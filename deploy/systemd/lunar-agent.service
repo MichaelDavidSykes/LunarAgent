@@ -1,0 +1,23 @@
+[Unit]
+Description=LunarAgent private reasoning service
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/lunarengine-prefect.env
+ExecStartPre=-/usr/bin/docker rm -f lunar-agent
+ExecStart=/usr/bin/docker run --rm \
+  --name lunar-agent \
+  --env-file /etc/lunarengine-prefect.env \
+  --publish 127.0.0.1:8310:8310 \
+  --security-opt no-new-privileges \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  lunar-agent:latest
+ExecStop=/usr/bin/docker stop lunar-agent
+Restart=always
+RestartSec=5
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

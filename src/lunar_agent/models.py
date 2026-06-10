@@ -23,3 +23,16 @@ class ExplorerAgentRespondResponse(BaseModel):
     actions: List[Dict[str, Any]] = Field(default_factory=list)
     followUps: List[str] = Field(default_factory=list)
     model: Optional[str] = None
+
+
+class SafeRouteAreaRiskResearchRequest(BaseModel):
+    sessionId: Optional[str] = Field(default=None)
+    aoi: Dict[str, Any] = Field(..., description="Sanitized AOI bounds and labels; must not include tenant or route identifiers.")
+    evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    maxZones: int = Field(default=8, ge=1, le=20)
+
+
+class SafeRouteAreaRiskResearchResponse(BaseModel):
+    zones: List[Dict[str, Any]] = Field(default_factory=list)
+    model: Optional[str] = None
+    notes: Optional[str] = None

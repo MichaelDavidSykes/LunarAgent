@@ -327,6 +327,11 @@ def _extract_text_from_chat_response(data: Dict[str, Any]) -> str:
     return ""
 
 
+def _uses_completion_token_limit(model: str) -> bool:
+    normalized = str(model or "").strip().lower()
+    return normalized.startswith(("gpt-5", "o1", "o3", "o4"))
+
+
 def _tool_specs() -> List[Dict[str, Any]]:
     return [
         {
@@ -442,27 +447,34 @@ async def _chat_completion_request(messages: List[Dict[str, Any]], tools: Option
     payload: Dict[str, Any] = {
         "model": settings.model,
         "messages": messages,
-        "temperature": 0.2,
-        "max_tokens": 900,
     }
+    if _uses_completion_token_limit(settings.model):
+        payload["max_completion_tokens"] = 900
+    else:
+        payload["temperature"] = 0.2
+        payload["max_tokens"] = 900
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
 
     response: Optional[httpx.Response] = None
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
-        if response.status_code == 400 and "max_tokens" in (response.text or ""):
-            retry_payload = dict(payload)
-            retry_payload.pop("max_tokens", None)
-            retry_payload["max_completion_tokens"] = 900
-            response = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=retry_payload)
-        if response.status_code == 400 and "temperature" in (response.text or ""):
-            retry_payload = dict(payload)
-            retry_payload.pop("temperature", None)
-            if "max_completion_tokens" not in retry_payload and "max_tokens" not in retry_payload:
+        request_payload = dict(payload)
+        for _ in range(3):
+            response = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=request_payload)
+            if response.status_code != 400:
+                break
+
+            body = response.text or ""
+            retry_payload = dict(request_payload)
+            if "max_tokens" in body:
+                retry_payload.pop("max_tokens", None)
                 retry_payload["max_completion_tokens"] = 900
-            response = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=retry_payload)
+            if "temperature" in body:
+                retry_payload.pop("temperature", None)
+            if retry_payload == request_payload:
+                break
+            request_payload = retry_payload
 
     if response is None:
         raise RuntimeError("No response received from OpenAI")
@@ -547,6 +559,132 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
             return content_text
 
     return await run_openai_analysis(messages)
+
+
+def build_safe_route_area_risk_messages(
+    *,
+    session_id: Optional[str],
+    aoi: Dict[str, Any],
+    evidence: List[Dict[str, Any]],
+    max_zones: int,
+) -> List[Dict[str, str]]:
+    system_prompt = (
+        "You are Lunar SafeRoute Area Risk Agent. "
+        "Identify broad public-safety area-risk zones from supplied public evidence only. "
+        "Do not infer anything from tenant identity, routes, waypoints, convoy details, or protected client data. "
+        "Do not provide tactical attack guidance. "
+        "Return strict JSON only."
+    )
+    payload = {
+        "agent": {
+            "name": "Lunar SafeRoute Area Risk Agent",
+            "runtime": "lunar-agent",
+            "mode": "sanitized-area-risk-research",
+        },
+        "sessionId": str(session_id or "").strip() or None,
+        "aoi": aoi,
+        "evidence": evidence[:40],
+        "maxZones": max(1, min(int(max_zones or 8), 20)),
+        "instructions": [
+            "Use only the supplied evidence and AOI metadata.",
+            "Produce zones only when evidence supports a named area or locality.",
+            "Each zone must include evidence_urls from the supplied evidence.",
+            "Prefer conservative broad area polygons or centers over precise claims when evidence is weak.",
+            "If evidence is insufficient, return zones=[].",
+            "Never include tenant IDs, route details, usernames, or operational/security-sensitive information.",
+        ],
+        "responseShape": {
+            "zones": [
+                {
+                    "label": "short area name",
+                    "severity": "low | medium | high | critical",
+                    "risk_score": "integer 0-100",
+                    "confidence": "source-backed | modelled | analyst-reviewed",
+                    "lat": "optional center latitude",
+                    "lon": "optional center longitude",
+                    "radius_m": "optional radius in meters",
+                    "coordinates": [{"lat": "number", "lon": "number"}],
+                    "display_color": "green | orange | red",
+                    "icon": "warning | building | shield | alert",
+                    "notes": "brief non-sensitive public-evidence summary",
+                    "evidence_urls": ["public source URL"],
+                }
+            ],
+            "notes": "brief processing note",
+        },
+    }
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+
+
+def normalize_safe_route_area_risk_payload(payload: Dict[str, Any], max_zones: int) -> Dict[str, Any]:
+    zones: List[Dict[str, Any]] = []
+    raw_zones = payload.get("zones") if isinstance(payload, dict) else []
+    if not isinstance(raw_zones, list):
+        raw_zones = []
+
+    for raw_zone in raw_zones:
+        if not isinstance(raw_zone, dict):
+            continue
+        label = _trim_text(raw_zone.get("label"), 120)
+        if not label:
+            continue
+        severity = str(raw_zone.get("severity") or "medium").strip().lower()
+        if severity not in {"low", "medium", "high", "critical"}:
+            severity = "medium"
+        confidence = str(raw_zone.get("confidence") or "source-backed").strip().lower()
+        if confidence not in {"source-backed", "modelled", "analyst-reviewed"}:
+            confidence = "source-backed"
+        display_color = str(raw_zone.get("display_color") or raw_zone.get("displayColor") or "").strip().lower()
+        if display_color not in {"green", "orange", "red"}:
+            display_color = "red" if severity in {"high", "critical"} else "orange" if severity == "medium" else "green"
+        evidence_urls = _normalize_text_list(
+            raw_zone.get("evidence_urls") or raw_zone.get("evidenceUrls"),
+            max_items=8,
+            max_len=400,
+        )
+        zones.append({
+            "label": label,
+            "severity": severity,
+            "risk_score": max(0, min(int(float(raw_zone.get("risk_score") or raw_zone.get("riskScore") or 45)), 100)),
+            "confidence": confidence,
+            "lat": raw_zone.get("lat"),
+            "lon": raw_zone.get("lon") if raw_zone.get("lon") is not None else raw_zone.get("lng"),
+            "radius_m": raw_zone.get("radius_m") or raw_zone.get("radiusM"),
+            "coordinates": raw_zone.get("coordinates") if isinstance(raw_zone.get("coordinates"), list) else [],
+            "display_color": display_color,
+            "icon": _trim_text(raw_zone.get("icon"), 80) or "warning",
+            "notes": _trim_text(raw_zone.get("notes"), 1200),
+            "evidence_urls": evidence_urls,
+        })
+        if len(zones) >= max(1, min(int(max_zones or 8), 20)):
+            break
+
+    return {
+        "zones": zones,
+        "notes": _trim_text(payload.get("notes") if isinstance(payload, dict) else None, 600),
+        "model": settings.model,
+    }
+
+
+async def research_safe_route_area_risk(
+    *,
+    session_id: Optional[str],
+    aoi: Dict[str, Any],
+    evidence: List[Dict[str, Any]],
+    max_zones: int = 8,
+) -> Dict[str, Any]:
+    messages = build_safe_route_area_risk_messages(
+        session_id=session_id,
+        aoi=aoi,
+        evidence=evidence,
+        max_zones=max_zones,
+    )
+    raw_answer = await run_openai_analysis(messages)
+    parsed = _safe_parse_json_object(raw_answer) or {"zones": []}
+    return normalize_safe_route_area_risk_payload(parsed, max_zones=max_zones)
 
 
 async def respond(
