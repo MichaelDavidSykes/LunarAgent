@@ -47,6 +47,33 @@ def _safe_parse_json_object(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _extract_responses_text(data: Dict[str, Any]) -> str:
+    output_text = data.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    parts: List[str] = []
+    output = data.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for content_item in content:
+                if not isinstance(content_item, dict):
+                    continue
+                text = content_item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+                elif isinstance(text, dict):
+                    value = text.get("value")
+                    if isinstance(value, str) and value.strip():
+                        parts.append(value.strip())
+    return "\n".join(parts).strip()
+
+
 def _normalize_text_list(value: Any, max_items: int = 4, max_len: int = 140) -> List[str]:
     if isinstance(value, str):
         candidates = [line.strip("-• \t") for line in value.splitlines() if line.strip()]
@@ -492,6 +519,49 @@ async def run_openai_analysis(messages: List[Dict[str, Any]]) -> str:
     return "I couldn't produce a structured answer for this query yet."
 
 
+async def run_openai_web_research(prompt: str, *, model: Optional[str] = None) -> str:
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    timeout = max(20, int(settings.http_timeout))
+    headers = {
+        "Authorization": f"Bearer {settings.openai_api_key}",
+        "Content-Type": "application/json",
+    }
+    context_size = str(settings.area_risk_search_context_size or "medium").strip().lower()
+    if context_size not in {"low", "medium", "high"}:
+        context_size = "medium"
+
+    base_payload: Dict[str, Any] = {
+        "model": model or settings.area_risk_model or settings.model,
+        "input": prompt,
+    }
+
+    tool_variants: List[List[Dict[str, Any]]] = [
+        [{"type": "web_search", "search_context_size": context_size}],
+        [{"type": "web_search_preview", "search_context_size": context_size}],
+    ]
+    last_error = ""
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for tools in tool_variants:
+            payload = dict(base_payload)
+            payload["tools"] = tools
+            try:
+                response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
+            except Exception as exc:
+                last_error = str(exc)
+                continue
+            if response.status_code < 400:
+                data = response.json() if response.content else {}
+                parsed_text = _extract_responses_text(data)
+                if parsed_text:
+                    return parsed_text
+                last_error = "Responses API returned no text"
+                continue
+            last_error = f"Responses API returned HTTP {response.status_code}: {response.text[:400]}"
+    raise RuntimeError(last_error or "Responses API web research failed")
+
+
 async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Optional[str]) -> str:
     if not str(settings.backend_base_url or "").strip() or not str(session_id or "").strip():
         return await run_openai_analysis(messages)
@@ -570,7 +640,7 @@ def build_safe_route_area_risk_messages(
 ) -> List[Dict[str, str]]:
     system_prompt = (
         "You are Lunar SafeRoute Area Risk Agent. "
-        "Identify broad public-safety area-risk zones from supplied public evidence only. "
+        "Identify named public-safety area-risk zones for route planning from sanitized AOI metadata, public evidence, and web research. "
         "Do not infer anything from tenant identity, routes, waypoints, convoy details, or protected client data. "
         "Do not provide tactical attack guidance. "
         "Return strict JSON only."
@@ -586,10 +656,13 @@ def build_safe_route_area_risk_messages(
         "evidence": evidence[:40],
         "maxZones": max(1, min(int(max_zones or 8), 20)),
         "instructions": [
-            "Use only the supplied evidence and AOI metadata.",
-            "Produce zones only when evidence supports a named area or locality.",
-            "Each zone must include evidence_urls from the supplied evidence.",
-            "Prefer conservative broad area polygons or centers over precise claims when evidence is weak.",
+            "Research and return named localities only: townships, neighbourhoods, informal settlements, industrial areas, transit nodes, or police-recognised crime hotspots.",
+            "Do not return broad city/county/province/country zones such as 'Cape Town public-safety watch' or generic AOI circles.",
+            "Prioritise areas with current or recurring public evidence of violent crime, gang violence, hijacking/carjacking, robbery, extortion, kidnapping, unrest, or severe road-safety disruption.",
+            "Do not include an area solely because it is poor, informal, high-density, lacks services, has sanitation issues, or is socially vulnerable.",
+            "Each zone must include evidence_urls from supplied evidence or current public web sources.",
+            "Prefer smaller locality-level centers with radius_m around 500-2500m. Use larger radii only for a named township/locality with a genuinely broad footprint.",
+            "If you cannot identify specific named areas, return zones=[].",
             "If evidence is insufficient, return zones=[].",
             "Never include tenant IDs, route details, usernames, or operational/security-sensitive information.",
         ],
@@ -606,7 +679,7 @@ def build_safe_route_area_risk_messages(
                     "coordinates": [{"lat": "number", "lon": "number"}],
                     "display_color": "green | orange | red",
                     "icon": "warning | building | shield | alert",
-                    "notes": "brief non-sensitive public-evidence summary",
+                    "notes": "brief non-sensitive public-evidence summary naming the risk pattern",
                     "evidence_urls": ["public source URL"],
                 }
             ],
@@ -617,6 +690,72 @@ def build_safe_route_area_risk_messages(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
+
+
+def build_safe_route_area_risk_web_prompt(
+    *,
+    session_id: Optional[str],
+    aoi: Dict[str, Any],
+    evidence: List[Dict[str, Any]],
+    max_zones: int,
+) -> str:
+    payload = {
+        "agent": {
+            "name": "Lunar SafeRoute Area Risk Agent",
+            "runtime": "lunar-agent",
+            "mode": "dynamic-public-area-risk-research",
+        },
+        "sessionId": str(session_id or "").strip() or None,
+        "aoi": aoi,
+        "seedEvidence": evidence[:20],
+        "maxZones": max(1, min(int(max_zones or 8), 20)),
+        "task": (
+            "Research current and recurring public-safety area risks inside or near this AOI for SafeRoute. "
+            "Return named townships, neighbourhoods, informal settlements, industrial areas, transit nodes, or police-recognised crime hotspots. "
+            "Do not return a broad city-wide/province-wide/country-wide AOI summary."
+        ),
+        "mustDo": [
+            "Use web research to identify specific named localities with public evidence.",
+            "Focus especially on townships, high-crime areas, gang-affected localities, hijacking/carjacking hotspots, robbery/extortion hotspots, and unrest-prone areas.",
+            "Only include informal settlements or deprived areas when public sources connect that named place to crime, violence, unrest, hijacking, robbery, extortion, or other direct public-safety risk.",
+            "Keep each zone small and locality-specific. radius_m should usually be 500-2500.",
+            "Include public source URLs for every zone.",
+            "Use approximate public-safety mapping only. Do not include tactical attack guidance or operational advice.",
+            "If the evidence supports a larger named township, use its approximate center and a radius that covers the township, not the whole AOI.",
+            "If you cannot identify named localities, return an empty zones array.",
+        ],
+        "mustNotDo": [
+            "Do not output labels like 'Cape Town public-safety watch', 'Western Cape risk area', or 'AOI risk zone'.",
+            "Do not create generic circles around the route or AOI center.",
+            "Do not include an area solely because it is poor, informal, high-density, lacks services, has sanitation issues, or is socially vulnerable.",
+            "Do not mention tenant, route, convoy, client, user, or waypoint details.",
+            "Do not invent precise boundaries when only public article-level evidence exists.",
+        ],
+        "responseShape": {
+            "zones": [
+                {
+                    "label": "named locality, e.g. township/neighbourhood/hotspot",
+                    "severity": "low | medium | high | critical",
+                    "risk_score": "integer 0-100",
+                    "confidence": "source-backed | modelled | analyst-reviewed",
+                    "lat": "center latitude if known",
+                    "lon": "center longitude if known",
+                    "radius_m": "500-2500 for most named localities",
+                    "coordinates": [{"lat": "number", "lon": "number"}],
+                    "display_color": "green | orange | red",
+                    "icon": "warning | building | shield | alert",
+                    "notes": "brief non-sensitive summary of the public risk pattern and why this named area was included",
+                    "evidence_urls": ["public source URL"],
+                }
+            ],
+            "notes": "brief processing note",
+        },
+    }
+    return (
+        "You are Lunar SafeRoute Area Risk Agent. Return strict JSON only.\n"
+        "Identify specific named public-safety risk localities from public web research.\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
 
 
 def normalize_safe_route_area_risk_payload(payload: Dict[str, Any], max_zones: int) -> Dict[str, Any]:
@@ -676,6 +815,28 @@ async def research_safe_route_area_risk(
     evidence: List[Dict[str, Any]],
     max_zones: int = 8,
 ) -> Dict[str, Any]:
+    if settings.area_risk_web_research_enabled:
+        web_prompt = build_safe_route_area_risk_web_prompt(
+            session_id=session_id,
+            aoi=aoi,
+            evidence=evidence,
+            max_zones=max_zones,
+        )
+        try:
+            raw_answer = await run_openai_web_research(web_prompt, model=settings.area_risk_model)
+            parsed = _safe_parse_json_object(raw_answer) or {"zones": []}
+            normalized = normalize_safe_route_area_risk_payload(parsed, max_zones=max_zones)
+            normalized["model"] = settings.area_risk_model
+            normalized["notes"] = normalized.get("notes") or "Dynamic public web research completed."
+            if normalized.get("zones"):
+                return normalized
+        except Exception as exc:
+            fallback_note = f"Dynamic web research failed; fell back to supplied evidence only: {_trim_text(exc, 180)}"
+        else:
+            fallback_note = "Dynamic web research returned no named locality zones; checked supplied evidence fallback."
+    else:
+        fallback_note = "Dynamic web research disabled; used supplied evidence only."
+
     messages = build_safe_route_area_risk_messages(
         session_id=session_id,
         aoi=aoi,
@@ -684,7 +845,9 @@ async def research_safe_route_area_risk(
     )
     raw_answer = await run_openai_analysis(messages)
     parsed = _safe_parse_json_object(raw_answer) or {"zones": []}
-    return normalize_safe_route_area_risk_payload(parsed, max_zones=max_zones)
+    normalized = normalize_safe_route_area_risk_payload(parsed, max_zones=max_zones)
+    normalized["notes"] = normalized.get("notes") or fallback_note
+    return normalized
 
 
 async def respond(
