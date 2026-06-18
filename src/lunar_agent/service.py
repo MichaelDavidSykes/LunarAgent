@@ -359,6 +359,33 @@ def _uses_completion_token_limit(model: str) -> bool:
     return normalized.startswith(("gpt-5", "o1", "o3", "o4"))
 
 
+def _uses_reasoning_effort(model: str) -> bool:
+    normalized = str(model or "").strip().lower()
+    return normalized.startswith("gpt-5")
+
+
+def _bounded_area_risk_max_zones(max_zones: int) -> int:
+    configured = max(1, min(int(settings.area_risk_max_zones_per_request or 6), 20))
+    requested = max(1, min(int(max_zones or configured), 20))
+    return min(requested, configured)
+
+
+def _bounded_area_risk_evidence(evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    max_items = max(1, min(int(settings.area_risk_max_evidence_items or 12), 40))
+    bounded: List[Dict[str, Any]] = []
+    for item in evidence[:max_items]:
+        if not isinstance(item, dict):
+            continue
+        bounded.append({
+            "title": _trim_text(item.get("title"), 180),
+            "url": _trim_text(item.get("url"), 400),
+            "source": _trim_text(item.get("source") or item.get("sourceName"), 120),
+            "published_at": _trim_text(item.get("published_at") or item.get("publishedAt") or item.get("date"), 80),
+            "snippet": _trim_text(item.get("snippet") or item.get("description") or item.get("summary"), 420),
+        })
+    return bounded
+
+
 def _tool_specs() -> List[Dict[str, Any]]:
     return [
         {
@@ -462,20 +489,26 @@ async def _execute_tool_call(name: str, arguments: Dict[str, Any], session_id: O
     return {"error": f"Unknown tool: {name}"}
 
 
-async def _chat_completion_request(messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+async def _chat_completion_request(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    *,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
 
     timeout = max(10, int(settings.http_timeout))
+    model_name = model or settings.model
     headers = {
         "Authorization": f"Bearer {settings.openai_api_key}",
         "Content-Type": "application/json",
     }
     payload: Dict[str, Any] = {
-        "model": settings.model,
+        "model": model_name,
         "messages": messages,
     }
-    if _uses_completion_token_limit(settings.model):
+    if _uses_completion_token_limit(model_name):
         payload["max_completion_tokens"] = 900
     else:
         payload["temperature"] = 0.2
@@ -511,8 +544,8 @@ async def _chat_completion_request(messages: List[Dict[str, Any]], tools: Option
     return response.json()
 
 
-async def run_openai_analysis(messages: List[Dict[str, Any]]) -> str:
-    data = await _chat_completion_request(messages)
+async def run_openai_analysis(messages: List[Dict[str, Any]], *, model: Optional[str] = None) -> str:
+    data = await _chat_completion_request(messages, model=model)
     parsed_text = _extract_text_from_chat_response(data)
     if parsed_text:
         return parsed_text
@@ -535,7 +568,12 @@ async def run_openai_web_research(prompt: str, *, model: Optional[str] = None) -
     base_payload: Dict[str, Any] = {
         "model": model or settings.area_risk_model or settings.model,
         "input": prompt,
+        "max_output_tokens": max(200, min(int(settings.area_risk_max_output_tokens or 700), 1400)),
     }
+    if _uses_reasoning_effort(str(base_payload["model"])):
+        effort = str(settings.area_risk_reasoning_effort or "low").strip().lower()
+        if effort in {"none", "low", "medium", "high", "xhigh"}:
+            base_payload["reasoning"] = {"effort": effort}
 
     tool_variants: List[List[Dict[str, Any]]] = [
         [{"type": "web_search", "search_context_size": context_size}],
@@ -551,6 +589,14 @@ async def run_openai_web_research(prompt: str, *, model: Optional[str] = None) -
             except Exception as exc:
                 last_error = str(exc)
                 continue
+            if response.status_code == 400 and "reasoning" in payload and "reasoning" in (response.text or "").lower():
+                retry_payload = dict(payload)
+                retry_payload.pop("reasoning", None)
+                try:
+                    response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=retry_payload)
+                except Exception as exc:
+                    last_error = str(exc)
+                    continue
             if response.status_code < 400:
                 data = response.json() if response.content else {}
                 parsed_text = _extract_responses_text(data)
@@ -638,6 +684,7 @@ def build_safe_route_area_risk_messages(
     evidence: List[Dict[str, Any]],
     max_zones: int,
 ) -> List[Dict[str, str]]:
+    bounded_max_zones = _bounded_area_risk_max_zones(max_zones)
     system_prompt = (
         "You are Lunar SafeRoute Area Risk Agent. "
         "Identify named public-safety area-risk zones for route planning from sanitized AOI metadata, public evidence, and web research. "
@@ -653,8 +700,8 @@ def build_safe_route_area_risk_messages(
         },
         "sessionId": str(session_id or "").strip() or None,
         "aoi": aoi,
-        "evidence": evidence[:40],
-        "maxZones": max(1, min(int(max_zones or 8), 20)),
+        "evidence": _bounded_area_risk_evidence(evidence),
+        "maxZones": bounded_max_zones,
         "instructions": [
             "Research and return named localities only: townships, neighbourhoods, informal settlements, industrial areas, transit nodes, or police-recognised crime hotspots.",
             "Do not return broad city/county/province/country zones such as 'Cape Town public-safety watch' or generic AOI circles.",
@@ -699,6 +746,7 @@ def build_safe_route_area_risk_web_prompt(
     evidence: List[Dict[str, Any]],
     max_zones: int,
 ) -> str:
+    bounded_max_zones = _bounded_area_risk_max_zones(max_zones)
     payload = {
         "agent": {
             "name": "Lunar SafeRoute Area Risk Agent",
@@ -707,8 +755,8 @@ def build_safe_route_area_risk_web_prompt(
         },
         "sessionId": str(session_id or "").strip() or None,
         "aoi": aoi,
-        "seedEvidence": evidence[:20],
-        "maxZones": max(1, min(int(max_zones or 8), 20)),
+        "seedEvidence": _bounded_area_risk_evidence(evidence),
+        "maxZones": bounded_max_zones,
         "task": (
             "Research current and recurring public-safety area risks inside or near this AOI for SafeRoute. "
             "Return named townships, neighbourhoods, informal settlements, industrial areas, transit nodes, or police-recognised crime hotspots. "
@@ -815,25 +863,34 @@ async def research_safe_route_area_risk(
     evidence: List[Dict[str, Any]],
     max_zones: int = 8,
 ) -> Dict[str, Any]:
+    bounded_max_zones = _bounded_area_risk_max_zones(max_zones)
     if settings.area_risk_web_research_enabled:
         web_prompt = build_safe_route_area_risk_web_prompt(
             session_id=session_id,
             aoi=aoi,
             evidence=evidence,
-            max_zones=max_zones,
+            max_zones=bounded_max_zones,
         )
         try:
             raw_answer = await run_openai_web_research(web_prompt, model=settings.area_risk_model)
             parsed = _safe_parse_json_object(raw_answer) or {"zones": []}
-            normalized = normalize_safe_route_area_risk_payload(parsed, max_zones=max_zones)
+            normalized = normalize_safe_route_area_risk_payload(parsed, max_zones=bounded_max_zones)
             normalized["model"] = settings.area_risk_model
             normalized["notes"] = normalized.get("notes") or "Dynamic public web research completed."
             if normalized.get("zones"):
                 return normalized
         except Exception as exc:
             fallback_note = f"Dynamic web research failed; fell back to supplied evidence only: {_trim_text(exc, 180)}"
+            if not settings.area_risk_fallback_on_web_error:
+                return {"zones": [], "model": settings.area_risk_model, "notes": fallback_note}
         else:
             fallback_note = "Dynamic web research returned no named locality zones; checked supplied evidence fallback."
+            if not settings.area_risk_fallback_on_empty_web:
+                return {
+                    "zones": [],
+                    "model": settings.area_risk_model,
+                    "notes": "Dynamic web research returned no named locality zones.",
+                }
     else:
         fallback_note = "Dynamic web research disabled; used supplied evidence only."
 
@@ -841,11 +898,12 @@ async def research_safe_route_area_risk(
         session_id=session_id,
         aoi=aoi,
         evidence=evidence,
-        max_zones=max_zones,
+        max_zones=bounded_max_zones,
     )
-    raw_answer = await run_openai_analysis(messages)
+    raw_answer = await run_openai_analysis(messages, model=settings.area_risk_model)
     parsed = _safe_parse_json_object(raw_answer) or {"zones": []}
-    normalized = normalize_safe_route_area_risk_payload(parsed, max_zones=max_zones)
+    normalized = normalize_safe_route_area_risk_payload(parsed, max_zones=bounded_max_zones)
+    normalized["model"] = settings.area_risk_model
     normalized["notes"] = normalized.get("notes") or fallback_note
     return normalized
 

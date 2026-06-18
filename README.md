@@ -63,6 +63,12 @@ Optional:
 - `LUNAR_AGENT_BACKEND_BASE_URL`
 - `LUNAR_AGENT_BACKEND_SHARED_TOKEN`
 - `LUNAR_AGENT_BACKEND_HTTP_TIMEOUT`
+- `LUNAR_AGENT_AREA_RISK_MODEL` (default `gpt-5.4-mini`)
+- `LUNAR_AGENT_AREA_RISK_SEARCH_CONTEXT_SIZE` (default `medium`)
+- `LUNAR_AGENT_AREA_RISK_MAX_OUTPUT_TOKENS` (default `700`)
+- `LUNAR_AGENT_AREA_RISK_MAX_EVIDENCE_ITEMS` (default `12`)
+- `LUNAR_AGENT_AREA_RISK_MAX_ZONES` (default `6`)
+- `LUNAR_AGENT_AREA_RISK_FALLBACK_ON_EMPTY_WEB` (default `false`, avoids a second model call when web research returns no named zones)
 
 If `LUNAR_AGENT_SHARED_TOKEN` is set, callers must send:
 
