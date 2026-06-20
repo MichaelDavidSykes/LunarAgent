@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import Depends, FastAPI, Header, HTTPException
 
 from .config import settings
@@ -10,6 +12,12 @@ from .models import (
 from .service import research_safe_route_area_risk, respond
 
 app = FastAPI(title=settings.project_name)
+logger = logging.getLogger(__name__)
+
+
+def raise_internal_server_error(exc: Exception, public_detail: str) -> None:
+    logger.exception(public_detail)
+    raise HTTPException(status_code=500, detail=public_detail) from exc
 
 
 def require_token(authorization: str | None = Header(default=None)) -> None:
@@ -48,7 +56,7 @@ async def explorer_agent_respond(request: ExplorerAgentRespondRequest) -> Explor
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise_internal_server_error(exc, "Explorer agent response failed.")
 
 
 @app.post("/v1/safe-route/area-risk/research", response_model=SafeRouteAreaRiskResearchResponse, dependencies=[Depends(require_token)])
@@ -64,4 +72,4 @@ async def safe_route_area_risk_research(request: SafeRouteAreaRiskResearchReques
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise_internal_server_error(exc, "Area risk research failed.")
