@@ -1,4 +1,5 @@
 import json
+import math
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -94,6 +95,46 @@ def _normalize_text_list(value: Any, max_items: int = 4, max_len: int = 140) -> 
         if len(out) >= max_items:
             break
     return out
+
+
+def _coerce_finite_float(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _coerce_bounded_float(value: Any, minimum: float, maximum: float) -> Optional[float]:
+    parsed = _coerce_finite_float(value)
+    if parsed is None or parsed < minimum or parsed > maximum:
+        return None
+    return parsed
+
+
+def _coerce_bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    parsed = _coerce_finite_float(value)
+    if parsed is None:
+        parsed = float(default)
+    return max(minimum, min(int(parsed), maximum))
+
+
+def _normalize_area_risk_coordinates(value: Any) -> List[Dict[str, float]]:
+    if not isinstance(value, list):
+        return []
+
+    coordinates: List[Dict[str, float]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        lat = _coerce_bounded_float(item.get("lat"), -90, 90)
+        lon = _coerce_bounded_float(item.get("lon") if item.get("lon") is not None else item.get("lng"), -180, 180)
+        if lat is None or lon is None:
+            continue
+        coordinates.append({"lat": lat, "lon": lon})
+    return coordinates
 
 
 def _normalize_module_key(value: Any) -> Optional[str]:
@@ -835,12 +876,12 @@ def normalize_safe_route_area_risk_payload(payload: Dict[str, Any], max_zones: i
         zones.append({
             "label": label,
             "severity": severity,
-            "risk_score": max(0, min(int(float(raw_zone.get("risk_score") or raw_zone.get("riskScore") or 45)), 100)),
+            "risk_score": _coerce_bounded_int(raw_zone.get("risk_score") or raw_zone.get("riskScore"), 45, 0, 100),
             "confidence": confidence,
-            "lat": raw_zone.get("lat"),
-            "lon": raw_zone.get("lon") if raw_zone.get("lon") is not None else raw_zone.get("lng"),
-            "radius_m": raw_zone.get("radius_m") or raw_zone.get("radiusM"),
-            "coordinates": raw_zone.get("coordinates") if isinstance(raw_zone.get("coordinates"), list) else [],
+            "lat": _coerce_bounded_float(raw_zone.get("lat"), -90, 90),
+            "lon": _coerce_bounded_float(raw_zone.get("lon") if raw_zone.get("lon") is not None else raw_zone.get("lng"), -180, 180),
+            "radius_m": _coerce_bounded_float(raw_zone.get("radius_m") or raw_zone.get("radiusM"), 0, 100000),
+            "coordinates": _normalize_area_risk_coordinates(raw_zone.get("coordinates")),
             "display_color": display_color,
             "icon": _trim_text(raw_zone.get("icon"), 80) or "warning",
             "notes": _trim_text(raw_zone.get("notes"), 1200),

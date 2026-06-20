@@ -140,6 +140,46 @@ def test_area_risk_web_prompt_uses_bounded_evidence_and_zone_caps(monkeypatch):
     assert len(payload["seedEvidence"][0]["snippet"]) <= 420
 
 
+def test_area_risk_payload_normalization_tolerates_malformed_numeric_fields():
+    payload = service_module.normalize_safe_route_area_risk_payload(
+        {
+            "zones": [
+                {
+                    "label": "Khayelitsha",
+                    "severity": "critical",
+                    "risk_score": "high",
+                    "lat": "not-a-lat",
+                    "lng": "18.6732",
+                    "radius_m": "wide",
+                    "coordinates": [
+                        {"lat": "-33.0392", "lng": "18.6732"},
+                        {"lat": "outside", "lng": "18.7"},
+                    ],
+                },
+                {
+                    "label": "Manenberg",
+                    "riskScore": "104.7",
+                    "lat": "-33.989",
+                    "lon": "18.559",
+                    "radiusM": "1250",
+                },
+            ],
+            "notes": "Normalized model result.",
+        },
+        max_zones=8,
+    )
+
+    assert payload["zones"][0]["risk_score"] == 45
+    assert payload["zones"][0]["lat"] is None
+    assert payload["zones"][0]["lon"] == 18.6732
+    assert payload["zones"][0]["radius_m"] is None
+    assert payload["zones"][0]["coordinates"] == [{"lat": -33.0392, "lon": 18.6732}]
+    assert payload["zones"][1]["risk_score"] == 100
+    assert payload["zones"][1]["lat"] == -33.989
+    assert payload["zones"][1]["lon"] == 18.559
+    assert payload["zones"][1]["radius_m"] == 1250.0
+
+
 def test_area_risk_empty_web_result_does_not_double_call_model(monkeypatch):
     monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", True)
     monkeypatch.setattr(service_module.settings, "area_risk_fallback_on_empty_web", False)
