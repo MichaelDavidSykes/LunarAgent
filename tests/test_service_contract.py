@@ -208,3 +208,34 @@ def test_area_risk_empty_web_result_does_not_double_call_model(monkeypatch):
         "model": "gpt-5.4-mini",
         "notes": "Dynamic web research returned no named locality zones.",
     }
+
+
+def test_area_risk_web_error_fallback_hides_provider_detail(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", True)
+    monkeypatch.setattr(service_module.settings, "area_risk_fallback_on_web_error", True)
+    monkeypatch.setattr(service_module.settings, "area_risk_model", "gpt-5.4-mini")
+
+    async def fail_web_research(*args, **kwargs):
+        raise RuntimeError("OpenAI returned HTTP 500: provider-secret-token")
+
+    async def fallback_analysis(*args, **kwargs):
+        return '{"zones":[]}'
+
+    monkeypatch.setattr(service_module, "run_openai_web_research", fail_web_research)
+    monkeypatch.setattr(service_module, "run_openai_analysis", fallback_analysis)
+
+    result = asyncio.run(
+        service_module.research_safe_route_area_risk(
+            session_id="session-1",
+            aoi={"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
+            evidence=[],
+            max_zones=8,
+        )
+    )
+
+    assert result == {
+        "zones": [],
+        "model": "gpt-5.4-mini",
+        "notes": "Dynamic web research failed; fell back to supplied evidence only.",
+    }
+    assert "provider-secret-token" not in json.dumps(result)

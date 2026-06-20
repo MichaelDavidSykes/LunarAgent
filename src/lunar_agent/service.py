@@ -1,10 +1,13 @@
 import json
+import logging
 import math
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _trim_text(value: Any, max_len: int = 240) -> str:
@@ -921,7 +924,12 @@ async def research_safe_route_area_risk(
             if normalized.get("zones"):
                 return normalized
         except Exception as exc:
-            fallback_note = f"Dynamic web research failed; fell back to supplied evidence only: {_trim_text(exc, 180)}"
+            logger.warning(
+                "Area-risk web research failed; falling back to supplied evidence only: %s",
+                exc,
+                exc_info=True,
+            )
+            fallback_note = "Dynamic web research failed; fell back to supplied evidence only."
             if not settings.area_risk_fallback_on_web_error:
                 return {"zones": [], "model": settings.area_risk_model, "notes": fallback_note}
         else:
