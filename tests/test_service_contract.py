@@ -185,10 +185,10 @@ def test_area_risk_empty_web_result_does_not_double_call_model(monkeypatch):
     monkeypatch.setattr(service_module.settings, "area_risk_fallback_on_empty_web", False)
     monkeypatch.setattr(service_module.settings, "area_risk_model", "gpt-5.4-mini")
 
-    async def fake_web_research(*args, **kwargs):
+    async def fake_web_research(*_args, **_kwargs):
         return '{"zones":[]}'
 
-    async def fail_analysis(*args, **kwargs):  # pragma: no cover - only runs on regression
+    async def fail_analysis(*_args, **_kwargs):  # pragma: no cover - only runs on regression
         raise AssertionError("fallback analysis should not run for an empty successful web result")
 
     monkeypatch.setattr(service_module, "run_openai_web_research", fake_web_research)
@@ -215,10 +215,10 @@ def test_area_risk_web_error_fallback_hides_provider_detail(monkeypatch):
     monkeypatch.setattr(service_module.settings, "area_risk_fallback_on_web_error", True)
     monkeypatch.setattr(service_module.settings, "area_risk_model", "gpt-5.4-mini")
 
-    async def fail_web_research(*args, **kwargs):
+    async def fail_web_research(*_args, **_kwargs):
         raise RuntimeError("OpenAI returned HTTP 500: provider-secret-token")
 
-    async def fallback_analysis(*args, **kwargs):
+    async def fallback_analysis(*_args, **_kwargs):
         return '{"zones":[]}'
 
     monkeypatch.setattr(service_module, "run_openai_web_research", fail_web_research)

@@ -9,7 +9,7 @@ def _client_without_shared_token(monkeypatch):
 
 
 def test_explorer_agent_endpoint_hides_internal_error_detail(monkeypatch):
-    async def fail_respond(**kwargs):
+    async def fail_respond(**_kwargs):
         raise RuntimeError("openai-provider-secret-token")
 
     monkeypatch.setattr(main_module, "respond", fail_respond)
@@ -34,7 +34,7 @@ def test_explorer_agent_endpoint_hides_internal_error_detail(monkeypatch):
 
 
 def test_area_risk_endpoint_hides_internal_error_detail(monkeypatch):
-    async def fail_research_safe_route_area_risk(**kwargs):
+    async def fail_research_safe_route_area_risk(**_kwargs):
         raise RuntimeError("backend-shared-token")
 
     monkeypatch.setattr(main_module, "research_safe_route_area_risk", fail_research_safe_route_area_risk)
