@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -430,6 +431,196 @@ def _bounded_area_risk_evidence(evidence: List[Dict[str, Any]]) -> List[Dict[str
     return bounded
 
 
+AREA_RISK_EVIDENCE_TERMS = {
+    "attack",
+    "attacks",
+    "carjacking",
+    "crime",
+    "criminal",
+    "disruption",
+    "extortion",
+    "hijacking",
+    "kidnapping",
+    "looting",
+    "murder",
+    "plundering",
+    "police",
+    "protest",
+    "protests",
+    "robbery",
+    "shooting",
+    "unrest",
+    "violence",
+    "violent",
+}
+
+AREA_RISK_LABEL_STOPWORDS = {
+    "area",
+    "areas",
+    "article",
+    "city",
+    "crime",
+    "criminal",
+    "hotspot",
+    "hotspots",
+    "logistics",
+    "police",
+    "public",
+    "report",
+    "reports",
+    "risk",
+    "risks",
+    "road",
+    "route",
+    "routes",
+    "safety",
+    "security",
+    "smoke",
+    "source",
+    "sources",
+    "transport",
+}
+
+
+def _area_risk_context_labels(aoi: Dict[str, Any]) -> set[str]:
+    labels: set[str] = set()
+    label_context = aoi.get("labelContext") if isinstance(aoi.get("labelContext"), dict) else {}
+    for value in [
+        label_context.get("place"),
+        label_context.get("country"),
+        label_context.get("display"),
+        *(aoi.get("countryHints") if isinstance(aoi.get("countryHints"), list) else []),
+    ]:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        labels.add(text.casefold())
+        for part in text.split(","):
+            part = part.strip()
+            if part:
+                labels.add(part.casefold())
+    return labels
+
+
+def _area_risk_text_has_term(text: str) -> bool:
+    normalized = str(text or "").casefold()
+    return any(term in normalized for term in AREA_RISK_EVIDENCE_TERMS)
+
+
+def _area_risk_terms_in_text(text: str, limit: int = 5) -> List[str]:
+    normalized = str(text or "").casefold()
+    terms = [term for term in sorted(AREA_RISK_EVIDENCE_TERMS) if term in normalized]
+    return terms[:limit]
+
+
+def _split_area_risk_label_candidate(value: str) -> List[str]:
+    parts = re.split(r"\s*(?:,|;|/|\band\b|\bor\b|&)\s*", value)
+    return [part.strip(" .:-()[]{}") for part in parts if part.strip(" .:-()[]{}")]
+
+
+def _area_risk_label_candidates_from_text(text: str) -> List[str]:
+    candidates: List[str] = []
+    preposition_pattern = re.compile(
+        r"\b(?:in|near|around|at|from|across|through|within|outside)\s+"
+        r"([A-Z][A-Za-z0-9'’.-]*(?:\s+(?:of|the|de|del|la|le|du|da|do|dos|das|van|von|[A-Z][A-Za-z0-9'’.-]*)){0,4})"
+    )
+    title_pattern = re.compile(
+        r"\b([A-Z][A-Za-z0-9'’.-]*(?:\s+(?:of|the|de|del|la|le|du|da|do|dos|das|van|von|[A-Z][A-Za-z0-9'’.-]*)){0,4})"
+    )
+    for pattern in [preposition_pattern, title_pattern]:
+        for match in pattern.finditer(str(text or "")):
+            for candidate in _split_area_risk_label_candidate(match.group(1)):
+                if candidate not in candidates:
+                    candidates.append(candidate)
+    return candidates
+
+
+def _clean_area_risk_label_candidate(label: str, context_labels: set[str]) -> Optional[str]:
+    cleaned = " ".join(str(label or "").replace("’", "'").split()).strip(" .:-()[]{}")
+    if not cleaned or len(cleaned) < 3 or len(cleaned) > 80:
+        return None
+    key = cleaned.casefold()
+    if key in context_labels:
+        return None
+    words = [word.strip("'-.").casefold() for word in cleaned.split() if word.strip("'-.")]
+    if not words or all(word in AREA_RISK_LABEL_STOPWORDS for word in words):
+        return None
+    if words[0] in AREA_RISK_LABEL_STOPWORDS:
+        return None
+    if any(fragment in key for fragment in {" public-safety watch", " aoi ", " risk area", " route planning"}):
+        return None
+    if len(words) > 5:
+        return None
+    return cleaned
+
+
+def fallback_safe_route_area_risk_candidates(
+    *,
+    aoi: Dict[str, Any],
+    evidence: List[Dict[str, Any]],
+    max_zones: int,
+) -> List[Dict[str, Any]]:
+    """Token-free fallback that extracts named, source-backed localities from bounded evidence."""
+
+    bounded_evidence = _bounded_area_risk_evidence(evidence)
+    context_labels = _area_risk_context_labels(aoi)
+    candidates: Dict[str, Dict[str, Any]] = {}
+
+    for item in bounded_evidence:
+        url = _trim_text(item.get("url"), 400)
+        if not url:
+            continue
+        title = _trim_text(item.get("title"), 180)
+        snippet = _trim_text(item.get("snippet"), 420)
+        searchable = " ".join(part for part in [title, snippet] if part)
+        if not _area_risk_text_has_term(searchable):
+            continue
+        risk_terms = _area_risk_terms_in_text(searchable)
+        for raw_label in _area_risk_label_candidates_from_text(searchable):
+            label = _clean_area_risk_label_candidate(raw_label, context_labels)
+            if not label:
+                continue
+            key = label.casefold()
+            record = candidates.setdefault(
+                key,
+                {
+                    "label": label,
+                    "risk_terms": set(),
+                    "evidence_urls": [],
+                    "mentions": 0,
+                },
+            )
+            record["mentions"] += 1
+            record["risk_terms"].update(risk_terms)
+            if url not in record["evidence_urls"]:
+                record["evidence_urls"].append(url)
+
+    ranked = sorted(
+        candidates.values(),
+        key=lambda item: (len(item["evidence_urls"]), item["mentions"], len(item["risk_terms"]), len(item["label"])),
+        reverse=True,
+    )
+    zones: List[Dict[str, Any]] = []
+    for item in ranked[: _bounded_area_risk_max_zones(max_zones)]:
+        terms = sorted(item["risk_terms"])[:5]
+        score = min(84, 48 + len(item["evidence_urls"]) * 8 + min(item["mentions"], 4) * 4 + len(terms) * 2)
+        severity = "high" if score >= 68 else "medium"
+        zones.append({
+            "label": item["label"],
+            "severity": severity,
+            "risk_score": score,
+            "confidence": "source-backed",
+            "display_color": "red" if severity == "high" else "orange",
+            "icon": "warning",
+            "notes": (
+                f"Bounded public evidence mentions {item['label']} alongside "
+                f"{', '.join(terms) if terms else 'public-safety risk terms'}."
+            ),
+            "evidence_urls": item["evidence_urls"][:8],
+        })
+    return zones
+
+
 def _tool_specs() -> List[Dict[str, Any]]:
     return [
         {
@@ -652,6 +843,42 @@ async def run_openai_web_research(prompt: str, *, model: Optional[str] = None) -
     raise RuntimeError(last_error or "Responses API web research failed")
 
 
+async def run_openai_responses_analysis(prompt: str, *, model: Optional[str] = None) -> str:
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    timeout = max(20, int(settings.http_timeout))
+    model_name = model or settings.area_risk_model or settings.model
+    headers = {
+        "Authorization": f"Bearer {settings.openai_api_key}",
+        "Content-Type": "application/json",
+    }
+    payload: Dict[str, Any] = {
+        "model": model_name,
+        "input": prompt,
+        "max_output_tokens": max(200, min(int(settings.area_risk_max_output_tokens or 700), 1400)),
+    }
+    if _uses_reasoning_effort(str(model_name)):
+        effort = str(settings.area_risk_reasoning_effort or "low").strip().lower()
+        if effort in {"none", "low", "medium", "high", "xhigh"}:
+            payload["reasoning"] = {"effort": effort}
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
+        if response.status_code == 400 and "reasoning" in payload and "reasoning" in (response.text or "").lower():
+            retry_payload = dict(payload)
+            retry_payload.pop("reasoning", None)
+            response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=retry_payload)
+
+    if response.status_code >= 400:
+        raise RuntimeError(f"Responses API returned HTTP {response.status_code}: {response.text[:400]}")
+    data = response.json() if response.content else {}
+    parsed_text = _extract_responses_text(data)
+    if parsed_text:
+        return parsed_text
+    raise RuntimeError("Responses API returned no text")
+
+
 async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Optional[str]) -> str:
     if not str(settings.backend_base_url or "").strip() or not str(session_id or "").strip():
         return await run_openai_analysis(messages)
@@ -850,6 +1077,22 @@ def build_safe_route_area_risk_web_prompt(
     )
 
 
+def build_safe_route_area_risk_evidence_prompt(
+    *,
+    session_id: Optional[str],
+    aoi: Dict[str, Any],
+    evidence: List[Dict[str, Any]],
+    max_zones: int,
+) -> str:
+    messages = build_safe_route_area_risk_messages(
+        session_id=session_id,
+        aoi=aoi,
+        evidence=evidence,
+        max_zones=max_zones,
+    )
+    return "\n\n".join(f"{message['role'].upper()}:\n{message['content']}" for message in messages)
+
+
 def normalize_safe_route_area_risk_payload(payload: Dict[str, Any], max_zones: int) -> Dict[str, Any]:
     zones: List[Dict[str, Any]] = []
     raw_zones = payload.get("zones") if isinstance(payload, dict) else []
@@ -859,7 +1102,7 @@ def normalize_safe_route_area_risk_payload(payload: Dict[str, Any], max_zones: i
     for raw_zone in raw_zones:
         if not isinstance(raw_zone, dict):
             continue
-        label = _trim_text(raw_zone.get("label"), 120)
+        label = _trim_text(raw_zone.get("label") or raw_zone.get("name") or raw_zone.get("title"), 120)
         if not label:
             continue
         severity = str(raw_zone.get("severity") or "medium").strip().lower()
@@ -943,15 +1186,33 @@ async def research_safe_route_area_risk(
     else:
         fallback_note = "Dynamic web research disabled; used supplied evidence only."
 
-    messages = build_safe_route_area_risk_messages(
-        session_id=session_id,
+    fallback_candidates = fallback_safe_route_area_risk_candidates(
         aoi=aoi,
         evidence=evidence,
         max_zones=bounded_max_zones,
     )
-    raw_answer = await run_openai_analysis(messages, model=settings.area_risk_model)
-    parsed = _safe_parse_json_object(raw_answer) or {"zones": []}
-    normalized = normalize_safe_route_area_risk_payload(parsed, max_zones=bounded_max_zones)
+    if fallback_candidates:
+        normalized_fallback = normalize_safe_route_area_risk_payload(
+            {"zones": fallback_candidates},
+            max_zones=bounded_max_zones,
+        )
+        normalized_fallback["model"] = settings.area_risk_model
+        normalized_fallback["notes"] = "Used bounded public evidence fallback for named locality candidates."
+        return normalized_fallback
+
+    try:
+        evidence_prompt = build_safe_route_area_risk_evidence_prompt(
+            session_id=session_id,
+            aoi=aoi,
+            evidence=evidence,
+            max_zones=bounded_max_zones,
+        )
+        raw_answer = await run_openai_responses_analysis(evidence_prompt, model=settings.area_risk_model)
+        parsed = _safe_parse_json_object(raw_answer) or {"zones": []}
+        normalized = normalize_safe_route_area_risk_payload(parsed, max_zones=bounded_max_zones)
+    except Exception as exc:
+        logger.warning("Area-risk evidence analysis failed; using deterministic evidence fallback: %s", exc)
+        normalized = {"zones": [], "notes": ""}
     normalized["model"] = settings.area_risk_model
     normalized["notes"] = normalized.get("notes") or fallback_note
     return normalized
