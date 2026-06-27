@@ -52,6 +52,37 @@ def _safe_parse_json_object(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _extract_wrapped_reply_payload(value: Any) -> Optional[Dict[str, Any]]:
+    text = _trim_text(value, 12000)
+    if not text:
+        return None
+
+    parsed = _safe_parse_json_object(text)
+    if not isinstance(parsed, dict):
+        return None
+
+    return parsed if any(key in parsed for key in ("reply", "answer", "message", "content")) else None
+
+
+def _normalize_reply_text(value: Any, max_len: int = 12000) -> str:
+    if isinstance(value, dict):
+        value = value.get("reply") or value.get("answer") or value.get("message") or value.get("content")
+
+    text = _trim_text(value, max_len)
+    for _ in range(3):
+        wrapped = _extract_wrapped_reply_payload(text)
+        if not wrapped:
+            break
+        nested = wrapped.get("reply") or wrapped.get("answer") or wrapped.get("message") or wrapped.get("content")
+        if not isinstance(nested, str) or not nested.strip():
+            break
+        next_text = _trim_text(nested, max_len)
+        if next_text == text:
+            break
+        text = next_text
+    return text
+
+
 def _extract_responses_text(data: Dict[str, Any]) -> str:
     output_text = data.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
@@ -318,16 +349,24 @@ def build_prompt_messages(
 
 
 def normalize_response_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    reply = _trim_text(payload.get("reply"), 12000)
+    wrapped_reply_payload = _extract_wrapped_reply_payload(payload.get("reply"))
+    reply = _normalize_reply_text(payload.get("reply"), 12000)
     actions = []
-    for action in payload.get("actions") or []:
+    for action in payload.get("actions") or (wrapped_reply_payload or {}).get("actions") or []:
         normalized = _normalize_action(action)
         if normalized:
             actions.append(normalized)
         if len(actions) >= 3:
             break
 
-    follow_ups = _normalize_text_list(payload.get("follow_ups") or payload.get("followUps"), max_items=4, max_len=120)
+    follow_ups = _normalize_text_list(
+        payload.get("follow_ups")
+        or payload.get("followUps")
+        or (wrapped_reply_payload or {}).get("follow_ups")
+        or (wrapped_reply_payload or {}).get("followUps"),
+        max_items=4,
+        max_len=120,
+    )
 
     return {
         "reply": reply or "I couldn't produce a structured answer for this query yet.",

@@ -60,6 +60,26 @@ def test_normalize_response_payload_supports_camel_case_followups_and_rejects_in
     assert payload["followUps"] == ["Compare reports", "List sources"]
 
 
+def test_normalize_response_payload_unwraps_json_reply_text_and_embedded_controls():
+    payload = normalize_response_payload(
+        {
+            "reply": json.dumps(
+                {
+                    "reply": "Summary of intelligence in current scope.",
+                    "actions": [{"type": "open_map", "label": "Open map"}],
+                    "follow_ups": ["Which reports changed?"],
+                }
+            )
+        }
+    )
+
+    assert payload == {
+        "reply": "Summary of intelligence in current scope.",
+        "actions": [{"type": "open_map", "label": "Open map"}],
+        "followUps": ["Which reports changed?"],
+    }
+
+
 def test_normalize_model_response_falls_back_to_plain_text_for_unstructured_output():
     payload = normalize_model_response("No structured JSON was returned.")
 
