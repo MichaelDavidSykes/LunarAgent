@@ -948,13 +948,13 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
     return await run_openai_analysis(messages)
 
 
-def build_safe_route_area_risk_messages(
+def build_safe_route_area_risk_evidence_prompt(
     *,
     session_id: Optional[str],
     aoi: Dict[str, Any],
     evidence: List[Dict[str, Any]],
     max_zones: int,
-) -> List[Dict[str, str]]:
+) -> str:
     bounded_max_zones = _bounded_area_risk_max_zones(max_zones)
     system_prompt = (
         "You are Lunar SafeRoute Area Risk Agent. "
@@ -1004,10 +1004,7 @@ def build_safe_route_area_risk_messages(
             "notes": "brief processing note",
         },
     }
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
+    return f"SYSTEM:\n{system_prompt}\n\nUSER:\n{json.dumps(payload, ensure_ascii=False)}"
 
 
 def build_safe_route_area_risk_web_prompt(
@@ -1077,22 +1074,6 @@ def build_safe_route_area_risk_web_prompt(
     )
 
 
-def build_safe_route_area_risk_evidence_prompt(
-    *,
-    session_id: Optional[str],
-    aoi: Dict[str, Any],
-    evidence: List[Dict[str, Any]],
-    max_zones: int,
-) -> str:
-    messages = build_safe_route_area_risk_messages(
-        session_id=session_id,
-        aoi=aoi,
-        evidence=evidence,
-        max_zones=max_zones,
-    )
-    return "\n\n".join(f"{message['role'].upper()}:\n{message['content']}" for message in messages)
-
-
 def normalize_safe_route_area_risk_payload(payload: Dict[str, Any], max_zones: int) -> Dict[str, Any]:
     zones: List[Dict[str, Any]] = []
     raw_zones = payload.get("zones") if isinstance(payload, dict) else []
@@ -1139,7 +1120,6 @@ def normalize_safe_route_area_risk_payload(payload: Dict[str, Any], max_zones: i
     return {
         "zones": zones,
         "notes": _trim_text(payload.get("notes") if isinstance(payload, dict) else None, 600),
-        "model": settings.model,
     }
 
 
