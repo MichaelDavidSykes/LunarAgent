@@ -134,6 +134,50 @@ def test_build_prompt_messages_declares_allowed_actions_when_enabled():
     ]
 
 
+def test_responses_payload_applies_reasoning_and_token_bounds(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_max_output_tokens", 5000)
+    monkeypatch.setattr(service_module.settings, "area_risk_reasoning_effort", "medium")
+
+    payload = service_module._responses_payload("Prompt text", model="gpt-5-mini")
+
+    assert payload == {
+        "model": "gpt-5-mini",
+        "input": "Prompt text",
+        "max_output_tokens": 1400,
+        "reasoning": {"effort": "medium"},
+    }
+
+
+def test_post_responses_request_retries_without_unsupported_reasoning():
+    class FakeResponse:
+        def __init__(self, status_code, text=""):
+            self.status_code = status_code
+            self.text = text
+
+    class FakeClient:
+        def __init__(self):
+            self.payloads = []
+
+        async def post(self, _url, *, headers, json):
+            self.payloads.append(dict(json))
+            if len(self.payloads) == 1:
+                return FakeResponse(400, "Unsupported parameter: reasoning")
+            return FakeResponse(200)
+
+    client = FakeClient()
+    response = asyncio.run(
+        service_module._post_responses_request(
+            client,
+            headers={"Authorization": "Bearer test"},
+            payload={"model": "gpt-5-mini", "input": "prompt", "reasoning": {"effort": "low"}},
+        )
+    )
+
+    assert response.status_code == 200
+    assert "reasoning" in client.payloads[0]
+    assert "reasoning" not in client.payloads[1]
+
+
 def test_area_risk_web_prompt_uses_bounded_evidence_and_zone_caps(monkeypatch):
     monkeypatch.setattr(service_module.settings, "area_risk_max_evidence_items", 3)
     monkeypatch.setattr(service_module.settings, "area_risk_max_zones_per_request", 4)

@@ -448,6 +448,43 @@ def _uses_reasoning_effort(model: str) -> bool:
     return normalized.startswith("gpt-5")
 
 
+def _openai_json_headers() -> Dict[str, str]:
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+    return {
+        "Authorization": f"Bearer {settings.openai_api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _responses_payload(prompt: str, *, model: Optional[str] = None) -> Dict[str, Any]:
+    model_name = model or settings.area_risk_model or settings.model
+    payload: Dict[str, Any] = {
+        "model": model_name,
+        "input": prompt,
+        "max_output_tokens": max(200, min(int(settings.area_risk_max_output_tokens or 700), 1400)),
+    }
+    if _uses_reasoning_effort(str(model_name)):
+        effort = str(settings.area_risk_reasoning_effort or "low").strip().lower()
+        if effort in {"none", "low", "medium", "high", "xhigh"}:
+            payload["reasoning"] = {"effort": effort}
+    return payload
+
+
+async def _post_responses_request(
+    client: httpx.AsyncClient,
+    *,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+) -> httpx.Response:
+    response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
+    if response.status_code == 400 and "reasoning" in payload and "reasoning" in (response.text or "").lower():
+        retry_payload = dict(payload)
+        retry_payload.pop("reasoning", None)
+        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=retry_payload)
+    return response
+
+
 def _bounded_area_risk_max_zones(max_zones: int) -> int:
     configured = max(1, min(int(settings.area_risk_max_zones_per_request or 6), 20))
     requested = max(1, min(int(max_zones or configured), 20))
@@ -827,28 +864,13 @@ async def run_openai_analysis(messages: List[Dict[str, Any]], *, model: Optional
 
 
 async def run_openai_web_research(prompt: str, *, model: Optional[str] = None) -> str:
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
-
     timeout = max(20, int(settings.http_timeout))
-    headers = {
-        "Authorization": f"Bearer {settings.openai_api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = _openai_json_headers()
     context_size = str(settings.area_risk_search_context_size or "medium").strip().lower()
     if context_size not in {"low", "medium", "high"}:
         context_size = "medium"
 
-    base_payload: Dict[str, Any] = {
-        "model": model or settings.area_risk_model or settings.model,
-        "input": prompt,
-        "max_output_tokens": max(200, min(int(settings.area_risk_max_output_tokens or 700), 1400)),
-    }
-    if _uses_reasoning_effort(str(base_payload["model"])):
-        effort = str(settings.area_risk_reasoning_effort or "low").strip().lower()
-        if effort in {"none", "low", "medium", "high", "xhigh"}:
-            base_payload["reasoning"] = {"effort": effort}
-
+    base_payload = _responses_payload(prompt, model=model)
     tool_variants: List[List[Dict[str, Any]]] = [
         [{"type": "web_search", "search_context_size": context_size}],
         [{"type": "web_search_preview", "search_context_size": context_size}],
@@ -859,18 +881,10 @@ async def run_openai_web_research(prompt: str, *, model: Optional[str] = None) -
             payload = dict(base_payload)
             payload["tools"] = tools
             try:
-                response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
+                response = await _post_responses_request(client, headers=headers, payload=payload)
             except Exception as exc:
                 last_error = str(exc)
                 continue
-            if response.status_code == 400 and "reasoning" in payload and "reasoning" in (response.text or "").lower():
-                retry_payload = dict(payload)
-                retry_payload.pop("reasoning", None)
-                try:
-                    response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=retry_payload)
-                except Exception as exc:
-                    last_error = str(exc)
-                    continue
             if response.status_code < 400:
                 data = response.json() if response.content else {}
                 parsed_text = _extract_responses_text(data)
@@ -883,31 +897,12 @@ async def run_openai_web_research(prompt: str, *, model: Optional[str] = None) -
 
 
 async def run_openai_responses_analysis(prompt: str, *, model: Optional[str] = None) -> str:
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
-
     timeout = max(20, int(settings.http_timeout))
-    model_name = model or settings.area_risk_model or settings.model
-    headers = {
-        "Authorization": f"Bearer {settings.openai_api_key}",
-        "Content-Type": "application/json",
-    }
-    payload: Dict[str, Any] = {
-        "model": model_name,
-        "input": prompt,
-        "max_output_tokens": max(200, min(int(settings.area_risk_max_output_tokens or 700), 1400)),
-    }
-    if _uses_reasoning_effort(str(model_name)):
-        effort = str(settings.area_risk_reasoning_effort or "low").strip().lower()
-        if effort in {"none", "low", "medium", "high", "xhigh"}:
-            payload["reasoning"] = {"effort": effort}
+    headers = _openai_json_headers()
+    payload = _responses_payload(prompt, model=model)
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
-        if response.status_code == 400 and "reasoning" in payload and "reasoning" in (response.text or "").lower():
-            retry_payload = dict(payload)
-            retry_payload.pop("reasoning", None)
-            response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=retry_payload)
+        response = await _post_responses_request(client, headers=headers, payload=payload)
 
     if response.status_code >= 400:
         raise RuntimeError(f"Responses API returned HTTP {response.status_code}: {response.text[:400]}")
