@@ -130,7 +130,7 @@ def test_tool_backed_fallback_returns_structured_graph_scope_summary():
 
     payload = json.loads(raw)
 
-    assert "2 scoped report" in payload["reply"]
+    assert "From the intelligence I inspected" in payload["reply"]
     assert "Report A" in payload["reply"]
     assert payload["actions"] == [
         {
@@ -249,7 +249,7 @@ def test_tool_aware_analysis_synthesizes_response_after_tool_use_without_final_t
     raw = asyncio.run(service_module.run_tool_aware_analysis([{"role": "user", "content": "Investigate"}], "session-1"))
     payload = json.loads(raw)
 
-    assert "1 scoped report" in payload["reply"]
+    assert "From the intelligence I inspected" in payload["reply"]
     assert payload["actions"][0]["type"] == "apply_graph_query_scope"
 
 
@@ -375,6 +375,156 @@ def test_build_prompt_messages_declares_allowed_actions_when_enabled():
         "apply_graph_query_scope",
     ]
     assert any("search_intelligence_graph" in item for item in prompt_payload["toolPolicy"])
+    assert any("search_public_web" in item for item in prompt_payload["toolPolicy"])
+
+
+def test_tool_specs_include_public_web_search():
+    tool_names = [tool["function"]["name"] for tool in service_module._tool_specs()]
+
+    assert "search_public_web" in tool_names
+
+
+def test_execute_public_web_search_tool_normalizes_web_research(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "web_research_enabled", True)
+    monkeypatch.setattr(service_module.settings, "model", "gpt-5")
+
+    captured = {}
+
+    async def fake_web_research(prompt, **kwargs):
+        captured["prompt"] = prompt
+        captured["kwargs"] = kwargs
+        return json.dumps(
+            {
+                "summary": "Public reporting says protests and coalition pressure are driving the situation.",
+                "findings": [
+                    {
+                        "claim": "Authorities reported protest activity in Johannesburg.",
+                        "source": "Example News",
+                        "url": "https://example.test/jhb",
+                        "date": "2026-06-28",
+                    }
+                ],
+                "sources": [{"title": "Johannesburg update", "url": "https://example.test/jhb"}],
+            }
+        )
+
+    monkeypatch.setattr(service_module, "run_openai_web_research", fake_web_research)
+
+    result = asyncio.run(
+        service_module._execute_tool_call(
+            "search_public_web",
+            {"query": "what is happening in South Africa", "region": "South Africa", "max_sources": 4},
+            session_id=None,
+        )
+    )
+
+    assert result["tool"] == "search_public_web"
+    assert result["status"] == "success"
+    assert result["findings"][0]["url"] == "https://example.test/jhb"
+    assert captured["kwargs"]["model"] == "gpt-5"
+    assert captured["kwargs"]["context_size"] == service_module.settings.web_search_context_size
+    assert "what is happening in South Africa" in captured["prompt"]
+
+
+def test_tool_aware_analysis_requires_web_after_graph_for_current_public_context(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
+    monkeypatch.setattr(service_module.settings, "web_research_enabled", True)
+
+    calls = []
+    executed_tools = []
+
+    async def fake_chat_completion(messages, tools=None, *, model=None):
+        calls.append({"messages": list(messages), "tools": tools, "model": model})
+        if len(calls) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-graph",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_intelligence_graph",
+                                        "arguments": json.dumps({"query": "South Africa"}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        if len(calls) == 2:
+            return {"choices": [{"message": {"content": "{\"reply\":\"graph-only\",\"actions\":[],\"follow_ups\":[]}"}}]}
+        if len(calls) == 3:
+            last_system = calls[-1]["messages"][-1]["content"]
+            assert "search_public_web" in last_system
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-web",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_public_web",
+                                        "arguments": json.dumps({"query": "South Africa latest developments"}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "reply": "Graph evidence and public web reporting both indicate a developing South Africa situation.",
+                                "actions": [],
+                                "follow_ups": [],
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    async def fake_execute_tool(tool_name, arguments, session_id):
+        executed_tools.append((tool_name, arguments, session_id))
+        if tool_name == "search_intelligence_graph":
+            return {
+                "summary": {"reportCount": 1},
+                "reports": [{"name": "Graph report", "contentSnippet": "Graph-backed incident context."}],
+                "explorerScope": {"compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc"},
+            }
+        assert tool_name == "search_public_web"
+        return {
+            "tool": "search_public_web",
+            "status": "success",
+            "summary": "Public web reporting adds current context.",
+            "findings": [{"claim": "A current public development was reported.", "url": "https://example.test"}],
+            "sources": [],
+        }
+
+    monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
+    monkeypatch.setattr(service_module, "_execute_tool_call", fake_execute_tool)
+
+    raw = asyncio.run(
+        service_module.run_tool_aware_analysis(
+            [{"role": "user", "content": "What's happening in South Africa?"}],
+            "session-1",
+        )
+    )
+    payload = json.loads(raw)
+
+    assert [tool_name for tool_name, *_ in executed_tools] == ["search_intelligence_graph", "search_public_web"]
+    assert "public web" in payload["reply"].lower()
 
 
 def test_responses_payload_applies_reasoning_and_token_bounds(monkeypatch):

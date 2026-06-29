@@ -328,10 +328,12 @@ def build_prompt_messages(
         "You are Lunar Explorer Agent inside LunarChain Explorer. "
         "Start as a normal intelligence chat; do not claim you loaded or inspected the current Explorer scope unless you actually used a scope tool. "
         "Your primary job is to answer intelligence questions with grounded evidence. "
-        "When a user asks for intelligence beyond the current Explorer scope, investigate the wider LunarGraph with the available graph tools. "
-        "Use only the provided query summary, explicit evidence, graph query results, and any report-reading tools available to you. "
+        "When a user asks for intelligence beyond the current Explorer scope, investigate the wider LunarGraph with the available graph tools first. "
+        "For broad, current, or open-ended questions, supplement the graph with public web research before answering. "
+        "Use only the provided query summary, explicit evidence, graph query results, report-reading tools, and public web search outputs available to you. "
         "Do not invent data, entities, report contents, or causal relationships. "
         "If evidence is only co-occurrence, say that clearly. "
+        "Never make the data model the answer: do not describe graph structure, node counts, location buckets, result rows, or 'located-at references' unless the user explicitly asks about coverage or data quality. "
         "Do not recommend generic filters, pivots, map views, or UI changes unless the user explicitly asks for them. "
         "You may include one opt-in apply_graph_query_scope action after a successful graph-wide search so the user can scope Explorer to your investigation. "
         "Default to actions=[] and follow_ups=[]. "
@@ -391,10 +393,12 @@ def build_prompt_messages(
         "toolPolicy": [
             "Use scoped report tools when the question is clearly about the current Explorer results.",
             "Use graph-wide tools when the user asks to investigate, search, find latest intel, or asks about a topic/entity that may be outside the current Explorer scope.",
+            "For questions such as 'what is happening in <place/topic>', 'latest', 'today', 'recent', 'news', 'browse/search the web', or other broad public-context requests: call search_intelligence_graph first, then search_public_web, then synthesize both.",
             "For short greetings or non-intelligence small talk, answer conversationally without using current-scope language.",
             "Resolve elliptical follow-ups from conversationHistory. If the user asks 'which individuals', 'what risk areas', 'how far back', or similar after a graph investigation, continue the same investigation/topic rather than starting from the current Explorer scope.",
             "Call graph_schema_context before writing custom AQL if you need schema, collection, relationship, or traversal guidance.",
             "Prefer search_intelligence_graph for report-centric investigations; it returns grounded snippets and an Explorer-compatible scope query.",
+            "Use search_public_web for current public reporting, context beyond LunarGraph, or when graph evidence is sparse/stale; always keep source URLs with claims derived from web research.",
             "Do not copy the current Explorer date range into created_from/created_to for a graph-wide search unless the user explicitly asks to constrain report publication dates. Event dates such as 'on the 30th' should be search terms, not report-created date bounds.",
             "Resolve relative dates using currentDateUtc; for example, 'on the 30th' should become an explicit ISO date when the month/year are clear from context.",
             "Use run_graph_read_query for custom, bounded, read-only AQL when search_intelligence_graph is insufficient.",
@@ -423,8 +427,11 @@ def build_prompt_messages(
         "instructions": [
             "Answer the user's question directly and analytically.",
             "Never open by saying you loaded the current Explorer scope unless the current user request explicitly asks about that scope.",
-            "Ground claims in the provided summary, relationship evidence, graph query outputs, and report-reading tool outputs only.",
+            "Ground claims in the provided summary, relationship evidence, graph query outputs, report-reading tool outputs, and search_public_web outputs only.",
+            "Turn graph evidence into a content-level intelligence synthesis: describe the events, actors, risks, locations, timelines, and uncertainties; do not narrate graph mechanics.",
+            "If using public web evidence, cite source URLs inline or in a short 'Sources' line. If graph and web evidence diverge, explain the difference by source/timeframe.",
             "For graph-wide requests, do not answer until you have used search_intelligence_graph or run_graph_read_query in this turn.",
+            "For broad/current public-context requests, do not answer until you have also used search_public_web in this turn unless web research is unavailable.",
             "For current-scope intelligence questions, do not answer until you have inspected at least one scoped report tool result in this turn.",
             (
                 "If allowUiActions=false, return no ordinary UI actions and no UI recommendations. "
@@ -617,12 +624,7 @@ def _report_entity_names(reports: List[Dict[str, Any]], limit: int = 12) -> List
 
 
 def _tool_payloads_have_intelligence_evidence(messages: List[Dict[str, Any]]) -> bool:
-    for payload in _tool_result_payloads(messages):
-        if payload.get("explorerScope") or payload.get("reports") or payload.get("matches") or payload.get("report"):
-            return True
-        if "resultCount" in payload or "result" in payload:
-            return True
-    return False
+    return _tool_payloads_have_graph_evidence(messages) or _tool_payloads_have_public_web_evidence(messages)
 
 
 def _conversation_search_text(messages: List[Dict[str, Any]], max_len: int = 900) -> str:
@@ -684,6 +686,117 @@ def _infer_rescue_graph_search_arguments(messages: List[Dict[str, Any]]) -> Dict
     }
 
 
+def _tool_payloads_have_graph_evidence(messages: List[Dict[str, Any]]) -> bool:
+    for payload in _tool_result_payloads(messages):
+        if payload.get("explorerScope") or payload.get("reports") or payload.get("matches") or payload.get("report"):
+            return True
+        if "resultCount" in payload or "result" in payload:
+            return True
+    return False
+
+
+def _tool_payloads_have_public_web_evidence(messages: List[Dict[str, Any]]) -> bool:
+    for payload in _tool_result_payloads(messages):
+        if payload.get("tool") != "search_public_web":
+            continue
+        if payload.get("summary") or payload.get("findings") or payload.get("sources"):
+            return True
+    return False
+
+
+def _request_mentions_current_scope(text: str) -> bool:
+    normalized = str(text or "").lower()
+    return any(fragment in normalized for fragment in (
+        "current explorer",
+        "current query",
+        "current scope",
+        "current results",
+        "these results",
+        "these reports",
+        "this graph",
+        "this query",
+        "this scope",
+    ))
+
+
+def _request_wants_public_web_context(messages: List[Dict[str, Any]]) -> bool:
+    text = _conversation_search_text(messages, max_len=1400)
+    latest = _latest_user_request_text(messages)
+    combined = f"{latest} | {text}".lower()
+    if _request_mentions_current_scope(combined) and not any(
+        term in combined for term in ("web", "internet", "browse", "google", "public sources", "outside the graph")
+    ):
+        return False
+    if re.search(r"\b(?:web|internet|browse|browser|search online|public sources|outside the graph)\b", combined):
+        return True
+    if re.search(r"\b(?:latest|current|currently|today|yesterday|overnight|this week|recent|news|updates|developments)\b", combined):
+        return True
+    if re.search(r"\bwhat(?:'s| is)?\s+(?:happening|going on|unfolding)\b", combined):
+        return True
+    return False
+
+
+def _report_content_lines(reports: List[Dict[str, Any]], limit: int = 4) -> List[str]:
+    lines: List[str] = []
+    for report in reports[:limit]:
+        if not isinstance(report, dict):
+            continue
+        name = _trim_text(report.get("name") or report.get("report") or "Unnamed report", 180)
+        snippet = _trim_text(
+            report.get("contentSnippet")
+            or report.get("descriptionSnippet")
+            or report.get("description")
+            or report.get("fullContent"),
+            420,
+        )
+        entities = _normalize_text_list(report.get("entities"), max_items=5, max_len=80)
+        source = _trim_text(report.get("sourceName"), 80)
+        source_link = _trim_text(report.get("sourceLink"), 240)
+        item_parts = []
+        if snippet:
+            item_parts.append(snippet)
+        if entities:
+            item_parts.append("named entities: " + ", ".join(entities))
+        if source_link:
+            item_parts.append(f"source: {source or source_link} ({source_link})")
+        elif source:
+            item_parts.append(f"source: {source}")
+        if item_parts:
+            lines.append(f"- **{name}:** " + " ".join(item_parts))
+        elif name:
+            lines.append(f"- **{name}.**")
+    return lines
+
+
+def _synthesize_public_web_lines(payload: Dict[str, Any]) -> List[str]:
+    summary = _trim_text(payload.get("summary") or payload.get("answer"), 1600)
+    lines: List[str] = []
+    if summary:
+        lines.append(summary)
+
+    findings = payload.get("findings")
+    if isinstance(findings, list) and findings:
+        finding_lines: List[str] = []
+        for item in findings[:5]:
+            if not isinstance(item, dict):
+                continue
+            claim = _trim_text(item.get("claim") or item.get("finding") or item.get("summary"), 280)
+            url = _trim_text(item.get("url"), 320)
+            source = _trim_text(item.get("source") or item.get("publisher") or item.get("title"), 140)
+            date = _trim_text(item.get("date") or item.get("published_at") or item.get("publishedAt"), 80)
+            if not claim:
+                continue
+            citation = ""
+            if url:
+                citation = f" ([{source or 'source'}]({url})" + (f", {date}" if date else "") + ")"
+            elif source or date:
+                citation = f" ({', '.join(part for part in (source, date) if part)})"
+            finding_lines.append(f"- {claim}{citation}")
+        if finding_lines:
+            lines.append("Public web findings:\n" + "\n".join(finding_lines))
+    return lines
+
+
 def _synthesize_tool_backed_response(messages: List[Dict[str, Any]]) -> str:
     """Last-resort JSON response when the model used tools but returned no text."""
     payloads = _tool_result_payloads(messages)
@@ -697,6 +810,16 @@ def _synthesize_tool_backed_response(messages: List[Dict[str, Any]]) -> str:
             "follow_ups": [],
         })
 
+    web_payload = next(
+        (
+            payload
+            for payload in reversed(payloads)
+            if payload.get("tool") == "search_public_web"
+            and (payload.get("summary") or payload.get("findings") or payload.get("sources"))
+        ),
+        None,
+    )
+
     for payload in reversed(payloads):
         explorer_scope = payload.get("explorerScope") if isinstance(payload.get("explorerScope"), dict) else None
         reports = _payload_report_items(payload)
@@ -704,8 +827,6 @@ def _synthesize_tool_backed_response(messages: List[Dict[str, Any]]) -> str:
         facets = payload.get("facets") if isinstance(payload.get("facets"), dict) else {}
         if explorer_scope or reports or payload.get("matches") or payload.get("report"):
             report_names = _report_name_list(reports)
-            report_count = int(summary.get("reportCount") or len(reports or []))
-            row_count = int(summary.get("resultRows") or (explorer_scope or {}).get("resultRows") or 0)
             locations = (
                 _facet_names(facets, "possibleRiskAreas", 6)
                 or _facet_names(facets, "locations", 6)
@@ -717,37 +838,45 @@ def _synthesize_tool_backed_response(messages: List[Dict[str, Any]]) -> str:
 
             if wants_risk_areas:
                 lines = [
-                    "The graph evidence I inspected points to these reported risk areas/locations: "
-                    + (", ".join(locations) if locations else "no specific sub-national risk areas were classified in the graph result")
+                    "The inspected intelligence points to these reported risk areas/locations: "
+                    + (", ".join(locations) if locations else "no specific sub-national risk areas were clearly identified")
                     + "."
                 ]
                 if report_names:
-                    lines.append("This is based on: " + "; ".join(report_names[:5]) + ".")
+                    lines.append("Relevant graph-backed reports: " + "; ".join(report_names[:5]) + ".")
                 if not locations:
-                    lines.append("The available graph result appears to be country-level or report-level; inspect the underlying reports for finer localities.")
+                    lines.append("The available report content appears to be country-level or incident-level; I would treat finer localities as uncertain.")
             elif wants_individuals:
                 named = individuals or actors or entities
                 if individuals:
-                    prefix = "The graph returned these person-classified individual nodes: "
+                    prefix = "The inspected intelligence names these possible individuals: "
                 elif actors:
-                    prefix = "I did not see clear person-classified individual nodes, but the graph returned these named actors/entities: "
+                    prefix = "I did not see clear person-classified individuals, but the inspected intelligence names these actors/entities: "
                 else:
-                    prefix = "I did not see clear person-classified individual nodes. Named entities in the inspected reports include: "
-                lines = [prefix + (", ".join(named[:8]) if named else "none in the returned tool evidence") + "."]
+                    prefix = "I did not see clear person-classified individuals. Named entities in the inspected reports include: "
+                lines = [prefix + (", ".join(named[:8]) if named else "none in the returned evidence") + "."]
                 if report_names:
                     lines.append("Relevant reports inspected: " + "; ".join(report_names[:5]) + ".")
-                lines.append("Treat this as entity evidence, not legal attribution, unless the underlying report explicitly states responsibility.")
+                lines.append("Treat this as entity evidence, not legal attribution, unless an underlying report explicitly states responsibility.")
             else:
+                content_lines = _report_content_lines(reports, limit=4)
                 lines = [
-                    f"I found graph intelligence for this request: {report_count} scoped report(s)"
-                    + (f" across {row_count} location bucket(s)." if row_count else ".")
+                    "From the intelligence I inspected, the main picture is:"
                 ]
-                if locations:
-                    lines.append("Top locations in the result set: " + ", ".join(locations[:4]) + ".")
-            if report_names and not (wants_risk_areas or wants_individuals):
-                lines.append("Most relevant reports: " + "; ".join(report_names[:5]) + ".")
-            if explorer_scope:
-                lines.append("Use the scoped Explorer view to inspect the underlying reports and entities.")
+                if content_lines:
+                    lines.extend(content_lines)
+                elif report_names:
+                    lines.append("Relevant graph-backed reports: " + "; ".join(report_names[:5]) + ".")
+                elif locations:
+                    lines.append("Reported locations/themes include: " + ", ".join(locations[:4]) + ".")
+                else:
+                    lines.append("The graph returned only sparse report metadata, so the substantive picture is uncertain.")
+
+            if web_payload:
+                web_lines = _synthesize_public_web_lines(web_payload)
+                if web_lines:
+                    lines.append("Public web context:\n" + "\n\n".join(web_lines))
+
             actions: List[Dict[str, Any]] = []
             if explorer_scope and explorer_scope.get("compiledAql"):
                 actions.append({
@@ -762,6 +891,14 @@ def _synthesize_tool_backed_response(messages: List[Dict[str, Any]]) -> str:
                 "actions": actions[:1],
                 "follow_ups": [],
             }, ensure_ascii=False)
+
+    if web_payload:
+        web_lines = _synthesize_public_web_lines(web_payload)
+        return json.dumps({
+            "reply": "\n\n".join(web_lines) if web_lines else "Public web research returned limited usable detail for this request.",
+            "actions": [],
+            "follow_ups": [],
+        }, ensure_ascii=False)
 
     for payload in reversed(payloads):
         if "resultCount" in payload or "result" in payload:
@@ -850,15 +987,23 @@ def _openai_json_headers() -> Dict[str, str]:
     }
 
 
-def _responses_payload(prompt: str, *, model: Optional[str] = None) -> Dict[str, Any]:
+def _responses_payload(
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    max_output_tokens: Optional[int] = None,
+    reasoning_effort: Optional[str] = None,
+) -> Dict[str, Any]:
     model_name = model or settings.area_risk_model or settings.model
+    token_limit = max_output_tokens if max_output_tokens is not None else int(settings.area_risk_max_output_tokens or 700)
+    token_cap = 2000 if max_output_tokens is not None else 1400
     payload: Dict[str, Any] = {
         "model": model_name,
         "input": prompt,
-        "max_output_tokens": max(200, min(int(settings.area_risk_max_output_tokens or 700), 1400)),
+        "max_output_tokens": max(200, min(int(token_limit or 700), token_cap)),
     }
     if _uses_reasoning_effort(str(model_name)):
-        effort = str(settings.area_risk_reasoning_effort or "low").strip().lower()
+        effort = str(reasoning_effort or settings.area_risk_reasoning_effort or "low").strip().lower()
         if effort in {"none", "low", "medium", "high", "xhigh"}:
             payload["reasoning"] = {"effort": effort}
     return payload
@@ -1090,6 +1235,123 @@ def fallback_safe_route_area_risk_candidates(
     return zones
 
 
+def build_public_web_search_prompt(
+    *,
+    query: str,
+    focus: Optional[str] = None,
+    region: Optional[str] = None,
+    recency_days: Optional[int] = None,
+    max_sources: int = 6,
+) -> str:
+    bounded_sources = max(2, min(int(max_sources or 6), 10))
+    payload = {
+        "agent": {
+            "name": "Lunar Explorer Agent",
+            "runtime": "lunar-agent",
+            "mode": "public-web-research-tool",
+        },
+        "currentDateUtc": datetime.now(timezone.utc).date().isoformat(),
+        "query": _trim_text(query, 500),
+        "focus": _trim_text(focus, 240) or None,
+        "region": _trim_text(region, 120) or None,
+        "recencyDays": max(1, min(int(recency_days), 3650)) if isinstance(recency_days, int) and recency_days > 0 else None,
+        "maxSources": bounded_sources,
+        "task": (
+            "Search the public internet for current, source-backed context that helps answer the user's intelligence question. "
+            "This is supporting research only; do not produce a final chat answer."
+        ),
+        "rules": [
+            "Prioritize reputable, current sources and official/public reporting where available.",
+            "Extract what is substantively happening: events, actors, affected locations, timelines, impacts, and uncertainties.",
+            "Do not summarize search-result mechanics or mention tool internals.",
+            "Do not provide tactical wrongdoing instructions.",
+            "Every finding that relies on public web evidence should include a source URL.",
+            "If sources disagree or are stale, say so in the summary.",
+        ],
+        "responseShape": {
+            "summary": "4-8 sentence source-backed synthesis for the agent to use",
+            "findings": [
+                {
+                    "claim": "one factual claim or development",
+                    "source": "publisher or page title",
+                    "url": "source URL",
+                    "date": "publication date if available",
+                }
+            ],
+            "sources": [
+                {
+                    "title": "page title",
+                    "publisher": "publisher",
+                    "url": "source URL",
+                    "date": "publication date if available",
+                }
+            ],
+        },
+    }
+    return (
+        "You are a public web research tool for Lunar Explorer Agent. Return strict JSON only.\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def normalize_public_web_search_payload(payload: Dict[str, Any], *, query: str) -> Dict[str, Any]:
+    findings: List[Dict[str, str]] = []
+    raw_findings = payload.get("findings") if isinstance(payload, dict) else []
+    if not isinstance(raw_findings, list):
+        raw_findings = []
+    for item in raw_findings:
+        if not isinstance(item, dict):
+            continue
+        claim = _trim_text(item.get("claim") or item.get("finding") or item.get("summary"), 360)
+        if not claim:
+            continue
+        finding = {
+            "claim": claim,
+            "source": _trim_text(item.get("source") or item.get("publisher") or item.get("title"), 160),
+            "url": _trim_text(item.get("url"), 500),
+            "date": _trim_text(item.get("date") or item.get("published_at") or item.get("publishedAt"), 80),
+        }
+        findings.append({key: value for key, value in finding.items() if value})
+        if len(findings) >= 8:
+            break
+
+    sources: List[Dict[str, str]] = []
+    raw_sources = payload.get("sources") if isinstance(payload, dict) else []
+    if not isinstance(raw_sources, list):
+        raw_sources = []
+    seen_urls: set[str] = set()
+    for item in raw_sources:
+        if not isinstance(item, dict):
+            continue
+        url = _trim_text(item.get("url"), 500)
+        title = _trim_text(item.get("title") or item.get("source") or item.get("publisher"), 180)
+        if not url and not title:
+            continue
+        if url and url in seen_urls:
+            continue
+        if url:
+            seen_urls.add(url)
+        source = {
+            "title": title,
+            "publisher": _trim_text(item.get("publisher") or item.get("source"), 140),
+            "url": url,
+            "date": _trim_text(item.get("date") or item.get("published_at") or item.get("publishedAt"), 80),
+        }
+        sources.append({key: value for key, value in source.items() if value})
+        if len(sources) >= 10:
+            break
+
+    summary = (payload.get("summary") or payload.get("answer")) if isinstance(payload, dict) else ""
+    return {
+        "tool": "search_public_web",
+        "query": _trim_text(query, 500),
+        "searchedAt": datetime.now(timezone.utc).isoformat(),
+        "summary": _trim_text(summary, 2200),
+        "findings": findings,
+        "sources": sources,
+    }
+
+
 def _tool_specs() -> List[Dict[str, Any]]:
     return [
         {
@@ -1133,6 +1395,28 @@ def _tool_specs() -> List[Dict[str, Any]]:
                         "report_id": {"type": "string"}
                     },
                     "required": ["report_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_public_web",
+                "description": (
+                    "Search the public internet for current source-backed context. "
+                    "Use after LunarGraph search for broad/current questions, or when the graph is sparse/stale."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Public web search query."},
+                        "focus": {"type": "string", "description": "Optional aspect to emphasize, such as unrest, cyber, shipping, politics, or public safety."},
+                        "region": {"type": "string", "description": "Optional country/region to constrain results."},
+                        "recency_days": {"type": "integer", "minimum": 1, "maximum": 3650},
+                        "max_sources": {"type": "integer", "minimum": 2, "maximum": 10},
+                    },
+                    "required": ["query"],
                     "additionalProperties": False,
                 },
             },
@@ -1237,6 +1521,56 @@ async def _call_backend_tool(path: str, payload: Dict[str, Any]) -> Dict[str, An
 
 
 async def _execute_tool_call(name: str, arguments: Dict[str, Any], session_id: Optional[str]) -> Dict[str, Any]:
+    if name == "search_public_web":
+        query = _trim_text(arguments.get("query"), 500)
+        if not query:
+            return {"tool": "search_public_web", "status": "error", "error": "Public web search query cannot be empty."}
+        if not settings.web_research_enabled:
+            return {"tool": "search_public_web", "status": "disabled", "summary": "Public web research is disabled."}
+        recency_days_value = arguments.get("recency_days")
+        recency_days = int(recency_days_value) if isinstance(recency_days_value, int) and recency_days_value > 0 else None
+        max_sources_value = arguments.get("max_sources")
+        max_sources = int(max_sources_value) if isinstance(max_sources_value, int) and max_sources_value > 0 else 6
+        prompt = build_public_web_search_prompt(
+            query=query,
+            focus=_trim_text(arguments.get("focus"), 240) or None,
+            region=_trim_text(arguments.get("region"), 120) or None,
+            recency_days=recency_days,
+            max_sources=max_sources,
+        )
+        try:
+            raw_answer = await run_openai_web_research(
+                prompt,
+                model=settings.model,
+                context_size=settings.web_search_context_size,
+                max_output_tokens=settings.web_max_output_tokens,
+                reasoning_effort=settings.web_reasoning_effort,
+            )
+            parsed = _safe_parse_json_object(raw_answer)
+            if isinstance(parsed, dict):
+                normalized = normalize_public_web_search_payload(parsed, query=query)
+                normalized["status"] = "success"
+                return normalized
+            return {
+                "tool": "search_public_web",
+                "status": "success",
+                "query": query,
+                "searchedAt": datetime.now(timezone.utc).isoformat(),
+                "summary": _trim_text(raw_answer, 2200),
+                "findings": [],
+                "sources": [],
+            }
+        except Exception as exc:
+            logger.warning("Public web research failed: %s", exc, exc_info=True)
+            return {
+                "tool": "search_public_web",
+                "status": "error",
+                "query": query,
+                "summary": "Public web research failed for this turn.",
+                "findings": [],
+                "sources": [],
+            }
+
     scoped_session_id = str(session_id or "").strip()
     if not scoped_session_id:
         return {"error": "No Explorer agent session is available for tool use."}
@@ -1373,17 +1707,29 @@ async def run_openai_analysis(messages: List[Dict[str, Any]], *, model: Optional
     return "I couldn't produce a structured answer for this query yet."
 
 
-async def run_openai_web_research(prompt: str, *, model: Optional[str] = None) -> str:
+async def run_openai_web_research(
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    context_size: Optional[str] = None,
+    max_output_tokens: Optional[int] = None,
+    reasoning_effort: Optional[str] = None,
+) -> str:
     timeout = max(20, int(settings.http_timeout))
     headers = _openai_json_headers()
-    context_size = str(settings.area_risk_search_context_size or "medium").strip().lower()
-    if context_size not in {"low", "medium", "high"}:
-        context_size = "medium"
+    resolved_context_size = str(context_size or settings.area_risk_search_context_size or "medium").strip().lower()
+    if resolved_context_size not in {"low", "medium", "high"}:
+        resolved_context_size = "medium"
 
-    base_payload = _responses_payload(prompt, model=model)
+    base_payload = _responses_payload(
+        prompt,
+        model=model,
+        max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
+    )
     tool_variants: List[List[Dict[str, Any]]] = [
-        [{"type": "web_search", "search_context_size": context_size}],
-        [{"type": "web_search_preview", "search_context_size": context_size}],
+        [{"type": "web_search", "search_context_size": resolved_context_size}],
+        [{"type": "web_search_preview", "search_context_size": resolved_context_size}],
     ]
     last_error = ""
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -1430,7 +1776,8 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
     working_messages: List[Dict[str, Any]] = list(messages)
     tools = _tool_specs()
     saw_tool_result = False
-    for _ in range(4):
+    wants_public_web_context = _request_wants_public_web_context(working_messages)
+    for _ in range(6):
         try:
             data = await _chat_completion_request(working_messages, tools=tools)
         except Exception:
@@ -1500,7 +1847,30 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
                     "content": (
                         "Before answering, inspect evidence with one of the available tools. "
                         "Use search_intelligence_graph or run_graph_read_query for graph-wide investigations; "
-                        "use search_scope_reports or list_scope_reports for current Explorer-scope questions."
+                        "use search_scope_reports or list_scope_reports for current Explorer-scope questions; "
+                        "use search_public_web after graph search for broad or current public-context questions."
+                    ),
+                })
+                continue
+            if wants_public_web_context and not _tool_payloads_have_graph_evidence(working_messages):
+                working_messages.append({
+                    "role": "system",
+                    "content": (
+                        "The user is asking for broad/current intelligence. Inspect LunarGraph first with "
+                        "search_intelligence_graph before producing the final answer."
+                    ),
+                })
+                continue
+            if (
+                wants_public_web_context
+                and settings.web_research_enabled
+                and not _tool_payloads_have_public_web_evidence(working_messages)
+            ):
+                working_messages.append({
+                    "role": "system",
+                    "content": (
+                        "The user is asking for broad/current public context. Now call search_public_web, "
+                        "then synthesize graph evidence and public web findings into a content-level answer."
                     ),
                 })
                 continue

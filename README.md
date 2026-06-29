@@ -7,6 +7,7 @@ The current design keeps responsibilities separated:
 - `LunarSurfaceBackend` handles auth, Explorer query execution, and session state.
 - `LunarAgent` receives the current Explorer session id, scoped summary, and conversation history.
 - `LunarAgent` can call bounded internal backend tools to inspect scoped reports before answering.
+- For broad or current-events questions, `LunarAgent` first checks LunarGraph and can then use OpenAI web search to add public web context.
 - `LunarAgent` returns:
   - `reply`
   - `actions`
@@ -45,7 +46,7 @@ Output:
   "reply": "markdown answer",
   "actions": [],
   "followUps": [],
-  "model": "gpt-5-mini"
+  "model": "gpt-5"
 }
 ```
 
@@ -59,11 +60,15 @@ Optional:
 
 - `LUNAR_AGENT_MODEL`
 - `LUNAR_AGENT_HTTP_TIMEOUT`
+- `LUNAR_AGENT_WEB_RESEARCH_ENABLED` (default `true`)
+- `LUNAR_AGENT_WEB_SEARCH_CONTEXT_SIZE` (default `medium`)
+- `LUNAR_AGENT_WEB_REASONING_EFFORT` (default `low`)
+- `LUNAR_AGENT_WEB_MAX_OUTPUT_TOKENS` (default `1000`)
 - `LUNAR_AGENT_SHARED_TOKEN`
 - `LUNAR_AGENT_BACKEND_BASE_URL`
 - `LUNAR_AGENT_BACKEND_SHARED_TOKEN`
 - `LUNAR_AGENT_BACKEND_HTTP_TIMEOUT`
-- `LUNAR_AGENT_AREA_RISK_MODEL` (default `gpt-5.4-mini`)
+- `LUNAR_AGENT_AREA_RISK_MODEL` (default `gpt-5-mini`)
 - `LUNAR_AGENT_AREA_RISK_SEARCH_CONTEXT_SIZE` (default `medium`)
 - `LUNAR_AGENT_AREA_RISK_MAX_OUTPUT_TOKENS` (default `700`)
 - `LUNAR_AGENT_AREA_RISK_MAX_EVIDENCE_ITEMS` (default `12`)
