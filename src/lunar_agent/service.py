@@ -704,6 +704,25 @@ def _tool_payloads_have_public_web_evidence(messages: List[Dict[str, Any]]) -> b
     return False
 
 
+def _tool_was_called(messages: List[Dict[str, Any]], tool_name: str) -> bool:
+    expected = str(tool_name or "").strip()
+    if not expected:
+        return False
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function_data = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+            if str(function_data.get("name") or "").strip() == expected:
+                return True
+    return False
+
+
 def _request_mentions_current_scope(text: str) -> bool:
     normalized = str(text or "").lower()
     return any(fragment in normalized for fragment in (
@@ -1852,7 +1871,11 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
                     ),
                 })
                 continue
-            if wants_public_web_context and not _tool_payloads_have_graph_evidence(working_messages):
+            graph_search_attempted = _tool_was_called(working_messages, "search_intelligence_graph") or _tool_was_called(
+                working_messages,
+                "run_graph_read_query",
+            )
+            if wants_public_web_context and not (_tool_payloads_have_graph_evidence(working_messages) or graph_search_attempted):
                 working_messages.append({
                     "role": "system",
                     "content": (

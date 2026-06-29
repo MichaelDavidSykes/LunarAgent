@@ -527,6 +527,87 @@ def test_tool_aware_analysis_requires_web_after_graph_for_current_public_context
     assert "public web" in payload["reply"].lower()
 
 
+def test_tool_aware_analysis_allows_web_after_attempted_empty_graph_search(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
+    monkeypatch.setattr(service_module.settings, "web_research_enabled", True)
+
+    calls = []
+    executed_tools = []
+
+    async def fake_chat_completion(messages, tools=None, *, model=None):
+        calls.append({"messages": list(messages), "tools": tools, "model": model})
+        if len(calls) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-graph",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_intelligence_graph",
+                                        "arguments": json.dumps({"query": "South Africa"}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        if len(calls) == 2:
+            return {"choices": [{"message": {"content": "{\"reply\":\"premature\",\"actions\":[],\"follow_ups\":[]}"}}]}
+        if len(calls) == 3:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-web",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_public_web",
+                                        "arguments": json.dumps({"query": "South Africa latest developments"}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {"choices": [{"message": {"content": "{\"reply\":\"web-backed final\",\"actions\":[],\"follow_ups\":[]}"}}]}
+
+    async def fake_execute_tool(tool_name, arguments, session_id):
+        executed_tools.append((tool_name, arguments, session_id))
+        if tool_name == "search_intelligence_graph":
+            return {"error": "No graph evidence returned."}
+        assert tool_name == "search_public_web"
+        return {
+            "tool": "search_public_web",
+            "status": "success",
+            "summary": "Public web reporting adds current context.",
+            "findings": [{"claim": "A current public development was reported.", "url": "https://example.test"}],
+            "sources": [],
+        }
+
+    monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
+    monkeypatch.setattr(service_module, "_execute_tool_call", fake_execute_tool)
+
+    raw = asyncio.run(
+        service_module.run_tool_aware_analysis(
+            [{"role": "user", "content": "What's happening in South Africa today?"}],
+            "session-1",
+        )
+    )
+    payload = json.loads(raw)
+
+    assert [tool_name for tool_name, *_ in executed_tools] == ["search_intelligence_graph", "search_public_web"]
+    assert payload["reply"] == "web-backed final"
+
+
 def test_responses_payload_applies_reasoning_and_token_bounds(monkeypatch):
     monkeypatch.setattr(service_module.settings, "area_risk_max_output_tokens", 5000)
     monkeypatch.setattr(service_module.settings, "area_risk_reasoning_effort", "medium")
