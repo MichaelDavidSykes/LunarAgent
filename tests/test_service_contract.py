@@ -80,6 +80,246 @@ def test_normalize_response_payload_unwraps_json_reply_text_and_embedded_control
     }
 
 
+def test_normalize_response_payload_accepts_graph_scope_action():
+    payload = normalize_response_payload(
+        {
+            "reply": "Found graph-wide intelligence.",
+            "actions": [
+                {
+                    "type": "apply_graph_query_scope",
+                    "label": "Scope Explorer to this investigation",
+                    "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+                    "queryPreview": "Graph investigation: South Africa",
+                }
+            ],
+        }
+    )
+
+    assert payload["actions"] == [
+        {
+            "type": "apply_graph_query_scope",
+            "label": "Scope Explorer to this investigation",
+            "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+            "queryPreview": "Graph investigation: South Africa",
+        }
+    ]
+
+
+def test_tool_backed_fallback_returns_structured_graph_scope_summary():
+    raw = service_module._synthesize_tool_backed_response(
+        [
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "summary": {
+                            "reportCount": 2,
+                            "resultRows": 1,
+                            "topLocations": [{"name": "South Africa", "count": 2}],
+                        },
+                        "reports": [{"name": "Report A"}, {"name": "Report B"}],
+                        "explorerScope": {
+                            "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+                            "queryPreview": "Graph investigation: South Africa",
+                        },
+                    }
+                ),
+            }
+        ]
+    )
+
+    payload = json.loads(raw)
+
+    assert "2 scoped report" in payload["reply"]
+    assert "Report A" in payload["reply"]
+    assert payload["actions"] == [
+        {
+            "type": "apply_graph_query_scope",
+            "label": "Scope Explorer to this investigation",
+            "reason": "Inspect the reports and entities returned by the graph-wide lookup.",
+            "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+            "queryPreview": "Graph investigation: South Africa",
+        }
+    ]
+
+
+def test_tool_backed_fallback_answers_individual_followup_from_facets():
+    raw = service_module._synthesize_tool_backed_response(
+        [
+            {
+                "role": "user",
+                "content": json.dumps({"currentUserMessage": "Okay, what individuals are implicated?"}),
+            },
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "reports": [{"name": "Report A", "entities": ["Fallback Entity"]}],
+                        "facets": {
+                            "possibleIndividuals": [{"name": "Jane Doe", "count": 2}],
+                            "possibleActors": [{"name": "Operation Example", "count": 1}],
+                        },
+                    }
+                ),
+            },
+        ]
+    )
+
+    payload = json.loads(raw)
+
+    assert "Jane Doe" in payload["reply"]
+    assert "no usable intelligence" not in payload["reply"].lower()
+
+
+def test_tool_backed_fallback_answers_risk_area_followup_from_facets():
+    raw = service_module._synthesize_tool_backed_response(
+        [
+            {
+                "role": "user",
+                "content": json.dumps({"currentUserMessage": "what are the risk areas for the events on the 30th?"}),
+            },
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "reports": [{"name": "Report A"}],
+                        "facets": {
+                            "possibleRiskAreas": [{"name": "Johannesburg", "count": 2}],
+                        },
+                    }
+                ),
+            },
+        ]
+    )
+
+    payload = json.loads(raw)
+
+    assert "Johannesburg" in payload["reply"]
+    assert "risk areas" in payload["reply"].lower()
+
+
+def test_tool_aware_analysis_synthesizes_response_after_tool_use_without_final_text(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
+
+    calls = []
+
+    async def fake_chat_completion(messages, tools=None, *, model=None):
+        calls.append({"messages": list(messages), "tools": tools, "model": model})
+        if len(calls) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_intelligence_graph",
+                                        "arguments": json.dumps({"query": "South Africa xenophobic events"}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {"choices": [{"message": {"content": ""}}]}
+
+    async def fake_execute_tool(tool_name, arguments, session_id):
+        assert tool_name == "search_intelligence_graph"
+        assert session_id == "session-1"
+        return {
+            "summary": {"reportCount": 1, "resultRows": 1},
+            "reports": [{"name": "Graph report"}],
+            "explorerScope": {
+                "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+                "queryPreview": "Graph investigation",
+            },
+        }
+
+    async def fail_openai_analysis(*_args, **_kwargs):  # pragma: no cover - regression guard
+        raise AssertionError("should synthesize from tool output instead of generic fallback")
+
+    monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
+    monkeypatch.setattr(service_module, "_execute_tool_call", fake_execute_tool)
+    monkeypatch.setattr(service_module, "run_openai_analysis", fail_openai_analysis)
+
+    raw = asyncio.run(service_module.run_tool_aware_analysis([{"role": "user", "content": "Investigate"}], "session-1"))
+    payload = json.loads(raw)
+
+    assert "1 scoped report" in payload["reply"]
+    assert payload["actions"][0]["type"] == "apply_graph_query_scope"
+
+
+def test_tool_aware_analysis_rescues_schema_only_tool_turn(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
+
+    calls = []
+    executed_tools = []
+
+    async def fake_chat_completion(messages, tools=None, *, model=None):
+        calls.append({"messages": list(messages), "tools": tools, "model": model})
+        if len(calls) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-schema",
+                                    "type": "function",
+                                    "function": {"name": "graph_schema_context", "arguments": "{}"},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {"choices": [{"message": {"content": ""}}]}
+
+    async def fake_execute_tool(tool_name, arguments, session_id):
+        executed_tools.append((tool_name, arguments, session_id))
+        if tool_name == "graph_schema_context":
+            return {"schema": {"graphName": "lunargraph_graph"}}
+        assert tool_name == "search_intelligence_graph"
+        return {
+            "reports": [{"name": "Rescued report"}],
+            "facets": {"possibleRiskAreas": [{"name": "Johannesburg", "count": 1}]},
+            "explorerScope": {
+                "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+                "queryPreview": "Graph investigation",
+            },
+        }
+
+    async def fail_openai_analysis(*_args, **_kwargs):  # pragma: no cover - regression guard
+        raise AssertionError("should not fall back to a generic model call")
+
+    monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
+    monkeypatch.setattr(service_module, "_execute_tool_call", fake_execute_tool)
+    monkeypatch.setattr(service_module, "run_openai_analysis", fail_openai_analysis)
+
+    messages = build_prompt_messages(
+        session_id="session-1",
+        allow_ui_actions=False,
+        conversation_history=[
+            {"role": "user", "content": "What is happening on the 30th in SA?"},
+            {"role": "assistant", "content": "Most relevant reports: Article: June 30 shutdown."},
+        ],
+        query_preview="query",
+        summary={},
+        context={},
+        user_message="what are the risk areas for the events on the 30th?",
+    )
+    raw = asyncio.run(service_module.run_tool_aware_analysis(messages, "session-1"))
+    payload = json.loads(raw)
+
+    assert any(tool_name == "search_intelligence_graph" for tool_name, *_ in executed_tools)
+    assert "Johannesburg" in payload["reply"]
+
+
 def test_normalize_model_response_falls_back_to_plain_text_for_unstructured_output():
     payload = normalize_model_response("No structured JSON was returned.")
 
@@ -106,7 +346,8 @@ def test_build_prompt_messages_keeps_ui_actions_disabled_until_allowed():
 
     assert prompt_payload["allowUiActions"] is False
     assert prompt_payload["allowedActions"] == []
-    assert prompt_payload["responseShape"]["actions"] == []
+    assert prompt_payload["alwaysAllowedOptInActions"][0]["type"] == "apply_graph_query_scope"
+    assert prompt_payload["responseShape"]["actions"][0]["type"].endswith("apply_graph_query_scope")
     assert prompt_payload["conversationHistory"] == [{"role": "user", "content": "What matters?"}]
     assert any("allowUiActions=false" in instruction for instruction in prompt_payload["instructions"])
 
@@ -131,7 +372,9 @@ def test_build_prompt_messages_declares_allowed_actions_when_enabled():
         "apply_module_filter",
         "clear_module_filters",
         "open_map",
+        "apply_graph_query_scope",
     ]
+    assert any("search_intelligence_graph" in item for item in prompt_payload["toolPolicy"])
 
 
 def test_responses_payload_applies_reasoning_and_token_bounds(monkeypatch):

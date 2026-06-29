@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -184,6 +185,57 @@ def _normalize_module_key(value: Any) -> Optional[str]:
     return f"module-{text}"
 
 
+_ACTION_WRITE_KEYWORD_PATTERN = re.compile(
+    r"\b(INSERT|UPDATE|REPLACE|REMOVE|UPSERT|TRUNCATE|DROP|CREATE|ALTER|GRANT|REVOKE|IMPORT|EXPORT)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _mask_action_aql_non_executable(query: str) -> str:
+    chars = list(query or "")
+    index = 0
+    quote: Optional[str] = None
+    while index < len(chars):
+        char = chars[index]
+        next_char = chars[index + 1] if index + 1 < len(chars) else ""
+        if quote:
+            chars[index] = " "
+            if char == "\\" and index + 1 < len(chars):
+                chars[index + 1] = " "
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            chars[index] = " "
+            index += 1
+            continue
+        if char == "/" and next_char in {"/", "*"}:
+            chars[index] = chars[index + 1] = " "
+            index += 2
+            until = "\n" if next_char == "/" else "*/"
+            while index < len(chars):
+                if until == "\n" and chars[index] in {"\n", "\r"}:
+                    break
+                if until == "*/" and chars[index] == "*" and index + 1 < len(chars) and chars[index + 1] == "/":
+                    chars[index] = chars[index + 1] = " "
+                    index += 2
+                    break
+                chars[index] = " "
+                index += 1
+            continue
+        index += 1
+    return "".join(chars)
+
+
+def _looks_like_read_only_aql(value: str) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and not _ACTION_WRITE_KEYWORD_PATTERN.search(_mask_action_aql_non_executable(text))
+
+
 def _default_action_label(action_type: str, country_name: Optional[str], module_keys: List[str]) -> str:
     if action_type == "focus_country" and country_name:
         return f"Focus {country_name}"
@@ -197,6 +249,8 @@ def _default_action_label(action_type: str, country_name: Optional[str], module_
         return "Clear module filters"
     if action_type == "open_map":
         return "Open flat map"
+    if action_type == "apply_graph_query_scope":
+        return "Scope Explorer to this investigation"
     return "Run action"
 
 
@@ -211,6 +265,7 @@ def _normalize_action(action: Any) -> Optional[Dict[str, Any]]:
         "apply_module_filter",
         "clear_module_filters",
         "open_map",
+        "apply_graph_query_scope",
     }:
         return None
 
@@ -228,6 +283,15 @@ def _normalize_action(action: Any) -> Optional[Dict[str, Any]]:
         return None
     if action_type == "apply_module_filter" and not module_keys:
         return None
+    compiled_aql = _trim_text(
+        action.get("compiledAql")
+        or action.get("compiled_aql")
+        or action.get("query"),
+        60000,
+    )
+    query_preview = _trim_text(action.get("queryPreview") or action.get("query_preview"), 600) or None
+    if action_type == "apply_graph_query_scope" and not _looks_like_read_only_aql(compiled_aql):
+        return None
 
     reason = _trim_text(action.get("reason"), 180) or None
     label = _trim_text(action.get("label"), 80) or _default_action_label(action_type, country_name, module_keys)
@@ -244,6 +308,10 @@ def _normalize_action(action: Any) -> Optional[Dict[str, Any]]:
         payload["countryCode"] = country_code
     if module_keys:
         payload["moduleKeys"] = module_keys
+    if action_type == "apply_graph_query_scope":
+        payload["compiledAql"] = compiled_aql
+        if query_preview:
+            payload["queryPreview"] = query_preview
     return payload
 
 
@@ -258,11 +326,14 @@ def build_prompt_messages(
 ) -> List[Dict[str, str]]:
     system_prompt = (
         "You are Lunar Explorer Agent inside LunarChain Explorer. "
-        "Your primary job is to evaluate and explain the intelligence in the current Explorer scope. "
-        "Use only the provided query summary, explicit evidence, and any report-reading tools available to you. "
+        "Start as a normal intelligence chat; do not claim you loaded or inspected the current Explorer scope unless you actually used a scope tool. "
+        "Your primary job is to answer intelligence questions with grounded evidence. "
+        "When a user asks for intelligence beyond the current Explorer scope, investigate the wider LunarGraph with the available graph tools. "
+        "Use only the provided query summary, explicit evidence, graph query results, and any report-reading tools available to you. "
         "Do not invent data, entities, report contents, or causal relationships. "
         "If evidence is only co-occurrence, say that clearly. "
-        "Do not recommend filters, pivots, map views, or UI changes unless the user explicitly asks for them. "
+        "Do not recommend generic filters, pivots, map views, or UI changes unless the user explicitly asks for them. "
+        "You may include one opt-in apply_graph_query_scope action after a successful graph-wide search so the user can scope Explorer to your investigation. "
         "Default to actions=[] and follow_ups=[]. "
         "Return strict JSON only."
     )
@@ -274,8 +345,9 @@ def build_prompt_messages(
             "mode": "interactive-intelligence-analysis",
         },
         "sessionId": str(session_id or "").strip() or None,
+        "currentDateUtc": datetime.now(timezone.utc).date().isoformat(),
         "allowUiActions": bool(allow_ui_actions),
-        "allowedActions": [
+        "allowedActions": ([
             {
                 "type": "focus_country",
                 "when": "Only if the user explicitly asks you to focus the Explorer view on a country or location",
@@ -301,10 +373,34 @@ def build_prompt_messages(
                 "when": "Only if the user explicitly asks to open the flat map",
                 "requiredFields": [],
             },
-        ] if allow_ui_actions else [],
+        ] if allow_ui_actions else []) + ([
+            {
+                "type": "apply_graph_query_scope",
+                "when": "Use after search_intelligence_graph returns explorerScope and the answer is based on a graph-wide investigation beyond the current Explorer scope. This must be an opt-in button, never automatic.",
+                "requiredFields": ["compiledAql", "queryPreview"],
+            },
+        ] if allow_ui_actions else []),
+        "alwaysAllowedOptInActions": [
+            {
+                "type": "apply_graph_query_scope",
+                "when": "Allowed even when allowUiActions=false, but only after search_intelligence_graph returns explorerScope for this turn.",
+                "requiredFields": ["compiledAql", "queryPreview"],
+                "label": "Scope Explorer to this investigation",
+            }
+        ],
         "toolPolicy": [
-            "If the user asks about a specific actor, country, IOC, malware family, source, campaign, or topic, call search_scope_reports first.",
-            "If the question asks what the intelligence actually says, inspect scoped reports before answering.",
+            "Use scoped report tools when the question is clearly about the current Explorer results.",
+            "Use graph-wide tools when the user asks to investigate, search, find latest intel, or asks about a topic/entity that may be outside the current Explorer scope.",
+            "For short greetings or non-intelligence small talk, answer conversationally without using current-scope language.",
+            "Resolve elliptical follow-ups from conversationHistory. If the user asks 'which individuals', 'what risk areas', 'how far back', or similar after a graph investigation, continue the same investigation/topic rather than starting from the current Explorer scope.",
+            "Call graph_schema_context before writing custom AQL if you need schema, collection, relationship, or traversal guidance.",
+            "Prefer search_intelligence_graph for report-centric investigations; it returns grounded snippets and an Explorer-compatible scope query.",
+            "Do not copy the current Explorer date range into created_from/created_to for a graph-wide search unless the user explicitly asks to constrain report publication dates. Event dates such as 'on the 30th' should be search terms, not report-created date bounds.",
+            "Resolve relative dates using currentDateUtc; for example, 'on the 30th' should become an explicit ISO date when the month/year are clear from context.",
+            "Use run_graph_read_query for custom, bounded, read-only AQL when search_intelligence_graph is insufficient.",
+            "Use get_graph_report_detail before making a precise claim from a specific graph-wide report.",
+            "If the user asks about a specific actor, country, IOC, malware family, source, campaign, or topic inside the current scope, call search_scope_reports first.",
+            "If the question asks what the current scoped intelligence actually says, inspect scoped reports before answering.",
             "Use list_scope_reports for broad orientation, search_scope_reports for entity or phrase questions, and get_scope_report_detail before making a precise report-level claim.",
             "Prefer report text and explicit relationship evidence over high-level counters.",
         ],
@@ -312,26 +408,31 @@ def build_prompt_messages(
             "reply": "markdown string",
             "actions": [
                 {
-                    "type": "focus_country | clear_country_focus | apply_module_filter | clear_module_filters | open_map",
+                    "type": "focus_country | clear_country_focus | apply_module_filter | clear_module_filters | open_map | apply_graph_query_scope",
                     "label": "short button label",
                     "reason": "short explanation",
                     "countryName": "optional string",
                     "countryCode": "optional ISO-2 string",
                     "moduleKeys": ["optional module keys like module-maritime"],
+                    "compiledAql": "required only for apply_graph_query_scope; use explorerScope.compiledAql exactly",
+                    "queryPreview": "required only for apply_graph_query_scope; use explorerScope.queryPreview",
                 }
-            ] if allow_ui_actions else [],
+            ],
             "follow_ups": ["short suggested follow-up questions"],
         },
         "instructions": [
             "Answer the user's question directly and analytically.",
-            "Ground claims in the provided summary, relationship evidence, and report-reading tool outputs only.",
-            "Do not answer a substantive intelligence question until you have inspected at least one scoped report tool result in this turn.",
+            "Never open by saying you loaded the current Explorer scope unless the current user request explicitly asks about that scope.",
+            "Ground claims in the provided summary, relationship evidence, graph query outputs, and report-reading tool outputs only.",
+            "For graph-wide requests, do not answer until you have used search_intelligence_graph or run_graph_read_query in this turn.",
+            "For current-scope intelligence questions, do not answer until you have inspected at least one scoped report tool result in this turn.",
             (
-                "If allowUiActions=false, return actions=[] and follow_ups=[] and do not recommend filtering, "
-                "pivoting, opening the map, or changing the Explorer UI."
+                "If allowUiActions=false, return no ordinary UI actions and no UI recommendations. "
+                "The only exception is one apply_graph_query_scope action using explorerScope.compiledAql from search_intelligence_graph."
             ),
             "Default to actions=[] and follow_ups=[].",
             "Only include actions if the user explicitly asks you to change or inspect the Explorer UI and allowUiActions=true.",
+            "For graph-wide investigations, include at most one apply_graph_query_scope action labelled 'Scope Explorer to this investigation' when explorerScope is available.",
             "Keep replies readable in a chat window.",
             "Do not wrap the JSON in code fences.",
         ],
@@ -384,6 +485,298 @@ def normalize_model_response(raw_text: str) -> Dict[str, Any]:
             "followUps": [],
         }
     return normalize_response_payload(parsed)
+
+
+def _tool_result_payloads(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    payloads: List[Dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            payloads.append(parsed)
+    return payloads
+
+
+def _report_name_list(reports: Any, limit: int = 5) -> List[str]:
+    if not isinstance(reports, list):
+        return []
+    names: List[str] = []
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        name = _trim_text(report.get("name") or report.get("report") or "Unnamed report", 180)
+        if name and name not in names:
+            names.append(name)
+        if len(names) >= limit:
+            break
+    return names
+
+
+def _latest_user_request_text(messages: List[Dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        text = _extract_text_from_content(content)
+        parsed = _safe_parse_json_object(text)
+        if isinstance(parsed, dict):
+            current = _trim_text(parsed.get("currentUserMessage"), 1600)
+            if current:
+                return current
+        if text:
+            return _trim_text(text, 1600)
+    return ""
+
+
+def _request_wants_individuals(text: str) -> bool:
+    normalized = str(text or "").lower()
+    return any(fragment in normalized for fragment in (
+        "individual", "individuals", "person", "people", "who ", "whom", "implicated", "named", "actors",
+    ))
+
+
+def _request_wants_risk_areas(text: str) -> bool:
+    normalized = str(text or "").lower()
+    return any(fragment in normalized for fragment in (
+        "risk area", "risk areas", "hotspot", "hotspots", "where", "which areas", "locations", "places",
+    ))
+
+
+def _payload_report_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for key in ("reports", "matches"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            out.extend(item for item in value if isinstance(item, dict))
+    report = payload.get("report")
+    if isinstance(report, dict):
+        out.append(report)
+    return out
+
+
+def _facet_names(facets: Any, key: str, limit: int = 8) -> List[str]:
+    if not isinstance(facets, dict):
+        return []
+    raw_items = facets.get(key)
+    if not isinstance(raw_items, list):
+        return []
+    names: List[str] = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            name = _trim_text(item.get("name"), 100)
+        else:
+            name = _trim_text(item, 100)
+        if name and name.lower() not in {existing.lower() for existing in names}:
+            names.append(name)
+        if len(names) >= limit:
+            break
+    return names
+
+
+def _summary_location_names(summary: Any, limit: int = 6) -> List[str]:
+    if not isinstance(summary, dict):
+        return []
+    locations = summary.get("topLocations")
+    if not isinstance(locations, list):
+        return []
+    names: List[str] = []
+    for item in locations:
+        if not isinstance(item, dict):
+            continue
+        name = _trim_text(item.get("name"), 100)
+        if name and name.lower() not in {existing.lower() for existing in names}:
+            names.append(name)
+        if len(names) >= limit:
+            break
+    return names
+
+
+def _report_entity_names(reports: List[Dict[str, Any]], limit: int = 12) -> List[str]:
+    names: List[str] = []
+    for report in reports:
+        entities = report.get("entities")
+        if not isinstance(entities, list):
+            continue
+        for entity in entities:
+            if isinstance(entity, dict):
+                name = _trim_text(entity.get("name") or entity.get("value") or entity.get("pattern"), 100)
+            else:
+                name = _trim_text(entity, 100)
+            if name and name.lower() not in {existing.lower() for existing in names}:
+                names.append(name)
+            if len(names) >= limit:
+                return names
+    return names
+
+
+def _tool_payloads_have_intelligence_evidence(messages: List[Dict[str, Any]]) -> bool:
+    for payload in _tool_result_payloads(messages):
+        if payload.get("explorerScope") or payload.get("reports") or payload.get("matches") or payload.get("report"):
+            return True
+        if "resultCount" in payload or "result" in payload:
+            return True
+    return False
+
+
+def _conversation_search_text(messages: List[Dict[str, Any]], max_len: int = 900) -> str:
+    parts: List[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        if role not in {"user", "assistant"}:
+            continue
+        text = _extract_text_from_content(message.get("content"))
+        parsed = _safe_parse_json_object(text)
+        if isinstance(parsed, dict):
+            text = _trim_text(parsed.get("currentUserMessage") or "", 1600)
+            history = parsed.get("conversationHistory")
+            if isinstance(history, list):
+                for item in history[-6:]:
+                    if isinstance(item, dict):
+                        item_text = _trim_text(item.get("content"), 500)
+                        if item_text:
+                            parts.append(item_text)
+        if text:
+            parts.append(text)
+    return _trim_text(" | ".join(parts[-8:]), max_len)
+
+
+def _infer_rescue_graph_search_arguments(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    search_text = _conversation_search_text(messages)
+    latest = _latest_user_request_text(messages)
+    combined = _trim_text(f"{latest} | Context: {search_text}", 900)
+    location_terms: List[str] = []
+    if re.search(r"\b(?:south africa|sa|za)\b", combined, flags=re.IGNORECASE):
+        location_terms = ["South Africa", "ZA"]
+
+    terms: List[str] = []
+    stopwords = {
+        "about", "after", "agent", "around", "before", "context", "current", "events", "graph", "hello",
+        "intelligence", "latest", "please", "report", "reports", "scope", "that", "the", "this", "what",
+        "which", "with", "would", "your",
+    }
+    for phrase in re.findall(r"Article:\s*([^;.\n|]{4,120})", combined):
+        clean = _trim_text(phrase, 120)
+        if clean and clean not in terms:
+            terms.append(clean)
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9'’:/._-]{2,}", combined):
+        normalized = token.lower().strip("'’")
+        if normalized in stopwords:
+            continue
+        if normalized not in {term.lower() for term in terms}:
+            terms.append(token)
+        if len(terms) >= 12:
+            break
+
+    return {
+        "query": combined or latest or "graph intelligence follow-up",
+        "terms": terms[:12],
+        "location_terms": location_terms,
+        "limit": 12,
+    }
+
+
+def _synthesize_tool_backed_response(messages: List[Dict[str, Any]]) -> str:
+    """Last-resort JSON response when the model used tools but returned no text."""
+    payloads = _tool_result_payloads(messages)
+    latest_request = _latest_user_request_text(messages)
+    wants_individuals = _request_wants_individuals(latest_request)
+    wants_risk_areas = _request_wants_risk_areas(latest_request)
+    if not payloads:
+        return json.dumps({
+            "reply": "I could not inspect enough graph evidence to answer this request. Try narrowing the question or rerunning the agent.",
+            "actions": [],
+            "follow_ups": [],
+        })
+
+    for payload in reversed(payloads):
+        explorer_scope = payload.get("explorerScope") if isinstance(payload.get("explorerScope"), dict) else None
+        reports = _payload_report_items(payload)
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        facets = payload.get("facets") if isinstance(payload.get("facets"), dict) else {}
+        if explorer_scope or reports or payload.get("matches") or payload.get("report"):
+            report_names = _report_name_list(reports)
+            report_count = int(summary.get("reportCount") or len(reports or []))
+            row_count = int(summary.get("resultRows") or (explorer_scope or {}).get("resultRows") or 0)
+            locations = (
+                _facet_names(facets, "possibleRiskAreas", 6)
+                or _facet_names(facets, "locations", 6)
+                or _summary_location_names(summary, 6)
+            )
+            individuals = _facet_names(facets, "possibleIndividuals", 8)
+            actors = _facet_names(facets, "possibleActors", 8)
+            entities = _report_entity_names(reports, 10)
+
+            if wants_risk_areas:
+                lines = [
+                    "The graph evidence I inspected points to these reported risk areas/locations: "
+                    + (", ".join(locations) if locations else "no specific sub-national risk areas were classified in the graph result")
+                    + "."
+                ]
+                if report_names:
+                    lines.append("This is based on: " + "; ".join(report_names[:5]) + ".")
+                if not locations:
+                    lines.append("The available graph result appears to be country-level or report-level; inspect the underlying reports for finer localities.")
+            elif wants_individuals:
+                named = individuals or actors or entities
+                if individuals:
+                    prefix = "The graph returned these person-classified individual nodes: "
+                elif actors:
+                    prefix = "I did not see clear person-classified individual nodes, but the graph returned these named actors/entities: "
+                else:
+                    prefix = "I did not see clear person-classified individual nodes. Named entities in the inspected reports include: "
+                lines = [prefix + (", ".join(named[:8]) if named else "none in the returned tool evidence") + "."]
+                if report_names:
+                    lines.append("Relevant reports inspected: " + "; ".join(report_names[:5]) + ".")
+                lines.append("Treat this as entity evidence, not legal attribution, unless the underlying report explicitly states responsibility.")
+            else:
+                lines = [
+                    f"I found graph intelligence for this request: {report_count} scoped report(s)"
+                    + (f" across {row_count} location bucket(s)." if row_count else ".")
+                ]
+                if locations:
+                    lines.append("Top locations in the result set: " + ", ".join(locations[:4]) + ".")
+            if report_names and not (wants_risk_areas or wants_individuals):
+                lines.append("Most relevant reports: " + "; ".join(report_names[:5]) + ".")
+            if explorer_scope:
+                lines.append("Use the scoped Explorer view to inspect the underlying reports and entities.")
+            actions: List[Dict[str, Any]] = []
+            if explorer_scope and explorer_scope.get("compiledAql"):
+                actions.append({
+                    "type": "apply_graph_query_scope",
+                    "label": "Scope Explorer to this investigation",
+                    "reason": "Inspect the reports and entities returned by the graph-wide lookup.",
+                    "compiledAql": explorer_scope.get("compiledAql"),
+                    "queryPreview": explorer_scope.get("queryPreview") or "Graph investigation",
+                })
+            return json.dumps({
+                "reply": "\n\n".join(lines),
+                "actions": actions[:1],
+                "follow_ups": [],
+            }, ensure_ascii=False)
+
+    for payload in reversed(payloads):
+        if "resultCount" in payload or "result" in payload:
+            count = int(payload.get("resultCount") or 0)
+            return json.dumps({
+                "reply": f"I ran a bounded read-only graph query and received {count} result row(s), but could not produce a full natural-language synthesis. Please ask a narrower follow-up or run a report-centric graph search.",
+                "actions": [],
+                "follow_ups": [],
+            }, ensure_ascii=False)
+
+    return json.dumps({
+        "reply": "I inspected the available graph tools, but no usable intelligence evidence was returned for this request.",
+        "actions": [],
+        "follow_ups": [],
+    }, ensure_ascii=False)
 
 
 def _extract_text_from_content(content: Any) -> str:
@@ -744,6 +1137,79 @@ def _tool_specs() -> List[Dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "graph_schema_context",
+                "description": "Get LunarGraph schema, canonical collections, aliases, relationship guidance, and query examples before writing custom AQL.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_intelligence_graph",
+                "description": "Search the wider Intelligence Graph beyond the current Explorer scope and return report snippets, summary evidence, and an Explorer-compatible scope query.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "terms": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Specific search terms/phrases, excluding generic words.",
+                        },
+                        "location_terms": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Country/location names and known ISO-2 codes, e.g. South Africa and ZA.",
+                        },
+                        "created_from": {"type": "string", "description": "Optional ISO date lower bound."},
+                        "created_to": {"type": "string", "description": "Optional ISO date upper bound."},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 30},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_graph_read_query",
+                "description": "Execute custom bounded read-only AQL against the wider Intelligence Graph. Use after graph_schema_context when search_intelligence_graph is insufficient.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "bind_vars": {"type": "object"},
+                        "result_limit": {"type": "integer", "minimum": 1, "maximum": 150},
+                        "max_runtime_seconds": {"type": "number", "minimum": 1, "maximum": 30},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_graph_report_detail",
+                "description": "Read fuller detail for one graph-wide report returned by search_intelligence_graph before making a precise report-level claim.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "report_id": {"type": "string"}
+                    },
+                    "required": ["report_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
     ]
 
 
@@ -797,6 +1263,50 @@ async def _execute_tool_call(name: str, arguments: Dict[str, Any], session_id: O
             {"session_id": scoped_session_id, "report_id": report_id},
         )
 
+    if name == "graph_schema_context":
+        return await _call_backend_tool(
+            "/api/v1/graph/ai-agent/tools/graph-schema",
+            {"session_id": scoped_session_id},
+        )
+
+    if name == "search_intelligence_graph":
+        payload: Dict[str, Any] = {
+            "session_id": scoped_session_id,
+            "query": _trim_text(arguments.get("query"), 500),
+            "limit": max(1, min(int(arguments.get("limit") or 12), 30)),
+        }
+        for source_key, target_key in (
+            ("terms", "terms"),
+            ("location_terms", "location_terms"),
+            ("created_from", "created_from"),
+            ("created_to", "created_to"),
+        ):
+            if source_key in arguments:
+                payload[target_key] = arguments.get(source_key)
+        return await _call_backend_tool(
+            "/api/v1/graph/ai-agent/tools/search-graph-intelligence",
+            payload,
+        )
+
+    if name == "run_graph_read_query":
+        return await _call_backend_tool(
+            "/api/v1/graph/ai-agent/tools/run-graph-read-query",
+            {
+                "session_id": scoped_session_id,
+                "query": _trim_text(arguments.get("query"), 20000),
+                "bind_vars": arguments.get("bind_vars") if isinstance(arguments.get("bind_vars"), dict) else {},
+                "result_limit": max(1, min(int(arguments.get("result_limit") or 80), 150)),
+                "max_runtime_seconds": max(1, min(float(arguments.get("max_runtime_seconds") or 18), 30)),
+            },
+        )
+
+    if name == "get_graph_report_detail":
+        report_id = _trim_text(arguments.get("report_id"), 240)
+        return await _call_backend_tool(
+            "/api/v1/graph/ai-agent/tools/get-graph-report",
+            {"session_id": scoped_session_id, "report_id": report_id},
+        )
+
     return {"error": f"Unknown tool: {name}"}
 
 
@@ -820,7 +1330,7 @@ async def _chat_completion_request(
         "messages": messages,
     }
     if _uses_completion_token_limit(model_name):
-        payload["max_completion_tokens"] = 900
+        payload["max_completion_tokens"] = 1200
     else:
         payload["temperature"] = 0.2
         payload["max_tokens"] = 900
@@ -840,7 +1350,7 @@ async def _chat_completion_request(
             retry_payload = dict(request_payload)
             if "max_tokens" in body:
                 retry_payload.pop("max_tokens", None)
-                retry_payload["max_completion_tokens"] = 900
+                retry_payload["max_completion_tokens"] = 1200
             if "temperature" in body:
                 retry_payload.pop("temperature", None)
             if retry_payload == request_payload:
@@ -924,6 +1434,22 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
         try:
             data = await _chat_completion_request(working_messages, tools=tools)
         except Exception:
+            if saw_tool_result:
+                if not _tool_payloads_have_intelligence_evidence(working_messages):
+                    try:
+                        rescue_result = await _execute_tool_call(
+                            "search_intelligence_graph",
+                            _infer_rescue_graph_search_arguments(working_messages),
+                            session_id,
+                        )
+                        working_messages.append({
+                            "role": "tool",
+                            "tool_call_id": "rescue-search",
+                            "content": json.dumps(rescue_result, ensure_ascii=False),
+                        })
+                    except Exception:
+                        pass
+                return _synthesize_tool_backed_response(working_messages)
             return await run_openai_analysis(messages)
         choices = data.get("choices")
         first_choice = choices[0] if isinstance(choices, list) and choices else {}
@@ -972,13 +1498,30 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
                 working_messages.append({
                     "role": "system",
                     "content": (
-                        "Before answering, inspect scoped reports with one of the available tools. "
-                        "Use search_scope_reports for specific topics/entities or list_scope_reports for broad orientation."
+                        "Before answering, inspect evidence with one of the available tools. "
+                        "Use search_intelligence_graph or run_graph_read_query for graph-wide investigations; "
+                        "use search_scope_reports or list_scope_reports for current Explorer-scope questions."
                     ),
                 })
                 continue
             return content_text
 
+    if saw_tool_result:
+        if not _tool_payloads_have_intelligence_evidence(working_messages):
+            try:
+                rescue_result = await _execute_tool_call(
+                    "search_intelligence_graph",
+                    _infer_rescue_graph_search_arguments(working_messages),
+                    session_id,
+                )
+                working_messages.append({
+                    "role": "tool",
+                    "tool_call_id": "rescue-search",
+                    "content": json.dumps(rescue_result, ensure_ascii=False),
+                })
+            except Exception:
+                pass
+        return _synthesize_tool_backed_response(working_messages)
     return await run_openai_analysis(messages)
 
 

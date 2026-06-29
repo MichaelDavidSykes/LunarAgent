@@ -27,6 +27,7 @@ ExecStart=/usr/bin/docker run --rm \
   --env LUNAR_AGENT_AREA_RISK_MAX_ZONES \
   --env LUNAR_AGENT_AREA_RISK_FALLBACK_ON_EMPTY_WEB \
   --publish 127.0.0.1:8310:8310 \
+  --publish 172.17.0.1:8310:8310 \
   --security-opt no-new-privileges \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   lunar-agent:latest

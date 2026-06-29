@@ -73,3 +73,9 @@ async def safe_route_area_risk_research(request: SafeRouteAreaRiskResearchReques
         raise
     except Exception as exc:
         raise_internal_server_error(exc, "Area risk research failed.")
+
+
+@app.post("/v1/threatscape/query-risk/research", response_model=SafeRouteAreaRiskResearchResponse, dependencies=[Depends(require_token)])
+async def threatscape_query_risk_research(request: SafeRouteAreaRiskResearchRequest) -> SafeRouteAreaRiskResearchResponse:
+    """Compatibility alias for the ThreatScape query-risk pipeline."""
+    return await safe_route_area_risk_research(request)

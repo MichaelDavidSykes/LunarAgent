@@ -53,3 +53,25 @@ def test_area_risk_endpoint_hides_internal_error_detail(monkeypatch):
     assert response.status_code == 500
     assert response.json() == {"detail": "Area risk research failed."}
     assert "backend-shared-token" not in response.text
+
+
+def test_threatscape_query_risk_alias_uses_area_risk_research(monkeypatch):
+    async def fake_research_safe_route_area_risk(**kwargs):
+        assert kwargs["session_id"] == "session-1"
+        return {"zones": [{"label": "Johannesburg"}], "model": "test-model", "notes": "ok"}
+
+    monkeypatch.setattr(main_module, "research_safe_route_area_risk", fake_research_safe_route_area_risk)
+    client = _client_without_shared_token(monkeypatch)
+
+    response = client.post(
+        "/v1/threatscape/query-risk/research",
+        json={
+            "sessionId": "session-1",
+            "aoi": {"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
+            "evidence": [],
+            "maxZones": 8,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["zones"] == [{"label": "Johannesburg"}]
