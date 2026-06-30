@@ -6,12 +6,13 @@ After=network-online.target docker.service
 [Service]
 Type=simple
 EnvironmentFile=/etc/lunarengine-prefect.env
-Environment=LUNAR_AGENT_MODEL=gpt-5
+Environment=LUNAR_AGENT_MODEL=gpt-5.1
 Environment=LUNAR_AGENT_WEB_RESEARCH_ENABLED=true
 Environment=LUNAR_AGENT_WEB_SEARCH_CONTEXT_SIZE=medium
 Environment=LUNAR_AGENT_WEB_REASONING_EFFORT=low
 Environment=LUNAR_AGENT_WEB_MAX_OUTPUT_TOKENS=1000
-Environment=LUNAR_AGENT_AREA_RISK_MODEL=gpt-5
+Environment=LUNAR_AGENT_CHAT_REASONING_EFFORT=low
+Environment=LUNAR_AGENT_AREA_RISK_MODEL=gpt-5.1
 Environment=LUNAR_AGENT_AREA_RISK_WEB_RESEARCH_ENABLED=false
 Environment=LUNAR_AGENT_AREA_RISK_SEARCH_CONTEXT_SIZE=medium
 Environment=LUNAR_AGENT_AREA_RISK_REASONING_EFFORT=low
@@ -23,11 +24,12 @@ ExecStartPre=-/usr/bin/docker rm -f lunar-agent
 ExecStart=/usr/bin/docker run --rm \
   --name lunar-agent \
   --env-file /etc/lunarengine-prefect.env \
-  --env LUNAR_AGENT_MODEL=gpt-5 \
+  --env LUNAR_AGENT_MODEL=gpt-5.1 \
   --env LUNAR_AGENT_WEB_RESEARCH_ENABLED=true \
   --env LUNAR_AGENT_WEB_SEARCH_CONTEXT_SIZE=medium \
   --env LUNAR_AGENT_WEB_REASONING_EFFORT=low \
   --env LUNAR_AGENT_WEB_MAX_OUTPUT_TOKENS=1000 \
+  --env LUNAR_AGENT_CHAT_REASONING_EFFORT=low \
   --env LUNAR_AGENT_AREA_RISK_MODEL \
   --env LUNAR_AGENT_AREA_RISK_WEB_RESEARCH_ENABLED \
   --env LUNAR_AGENT_AREA_RISK_SEARCH_CONTEXT_SIZE \

@@ -1065,6 +1065,15 @@ def _uses_reasoning_effort(model: str) -> bool:
     return normalized.startswith("gpt-5")
 
 
+def _chat_reasoning_effort(model: str) -> Optional[str]:
+    if not _uses_reasoning_effort(model):
+        return None
+    effort = str(settings.chat_reasoning_effort or "low").strip().lower()
+    if effort in {"none", "low", "medium", "high"}:
+        return effort
+    return "low"
+
+
 def _openai_json_headers() -> Dict[str, str]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -1755,6 +1764,9 @@ async def _chat_completion_request(
     legacy_token_limit = _bounded_legacy_chat_tokens()
     if _uses_completion_token_limit(model_name):
         payload["max_completion_tokens"] = completion_token_limit
+        reasoning_effort = _chat_reasoning_effort(model_name)
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
     else:
         payload["temperature"] = 0.2
         payload["max_tokens"] = legacy_token_limit
@@ -1771,12 +1783,15 @@ async def _chat_completion_request(
                 break
 
             body = response.text or ""
+            body_lower = body.lower()
             retry_payload = dict(request_payload)
             if "max_tokens" in body:
                 retry_payload.pop("max_tokens", None)
                 retry_payload["max_completion_tokens"] = completion_token_limit
             if "temperature" in body:
                 retry_payload.pop("temperature", None)
+            if "reasoning_effort" in body_lower or ("reasoning" in body_lower and "unsupported" in body_lower):
+                retry_payload.pop("reasoning_effort", None)
             if retry_payload == request_payload:
                 break
             request_payload = retry_payload

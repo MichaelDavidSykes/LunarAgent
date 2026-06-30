@@ -652,6 +652,86 @@ def test_post_responses_request_retries_without_unsupported_reasoning():
     assert "reasoning" not in client.payloads[1]
 
 
+def test_chat_completion_request_applies_gpt5_reasoning_effort(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(service_module.settings, "chat_reasoning_effort", "low")
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+        content = b"{}"
+
+        def json(self):
+            return {"choices": [{"message": {"content": "{\"reply\":\"ok\",\"actions\":[]}"}}]}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+            self.payloads = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, headers, json):
+            assert headers["Authorization"] == "Bearer test-key"
+            self.payloads.append(dict(json))
+            return FakeResponse()
+
+    fake_client = FakeClient(timeout=0)
+    monkeypatch.setattr(service_module.httpx, "AsyncClient", lambda timeout: fake_client)
+
+    data = asyncio.run(service_module._chat_completion_request([{"role": "user", "content": "Hello"}], model="gpt-5.1"))
+
+    assert data["choices"][0]["message"]["content"]
+    assert fake_client.payloads[0]["model"] == "gpt-5.1"
+    assert fake_client.payloads[0]["max_completion_tokens"] == service_module._bounded_chat_completion_tokens()
+    assert fake_client.payloads[0]["reasoning_effort"] == "low"
+
+
+def test_chat_completion_request_retries_without_unsupported_reasoning_effort(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(service_module.settings, "chat_reasoning_effort", "minimal")
+
+    class FakeResponse:
+        def __init__(self, status_code, text="", payload=None):
+            self.status_code = status_code
+            self.text = text
+            self.content = b"{}"
+            self._payload = payload or {"choices": [{"message": {"content": "{\"reply\":\"ok\"}"}}]}
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+            self.payloads = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, headers, json):
+            self.payloads.append(dict(json))
+            if len(self.payloads) == 1:
+                return FakeResponse(400, "Unsupported value: 'reasoning_effort'")
+            return FakeResponse(200)
+
+    fake_client = FakeClient(timeout=0)
+    monkeypatch.setattr(service_module.httpx, "AsyncClient", lambda timeout: fake_client)
+
+    data = asyncio.run(service_module._chat_completion_request([{"role": "user", "content": "Hello"}], model="gpt-5.1"))
+
+    assert data["choices"][0]["message"]["content"]
+    assert "reasoning_effort" in fake_client.payloads[0]
+    assert "reasoning_effort" not in fake_client.payloads[1]
+
+
 def test_area_risk_web_prompt_uses_bounded_evidence_and_zone_caps(monkeypatch):
     monkeypatch.setattr(service_module.settings, "area_risk_max_evidence_items", 3)
     monkeypatch.setattr(service_module.settings, "area_risk_max_zones_per_request", 4)
