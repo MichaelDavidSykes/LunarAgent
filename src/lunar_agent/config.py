@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     web_search_context_size: str = os.getenv("LUNAR_AGENT_WEB_SEARCH_CONTEXT_SIZE", "medium")
     web_reasoning_effort: str = os.getenv("LUNAR_AGENT_WEB_REASONING_EFFORT", "low")
     web_max_output_tokens: int = int(os.getenv("LUNAR_AGENT_WEB_MAX_OUTPUT_TOKENS", "1000"))
+    chat_max_completion_tokens: int = int(os.getenv("LUNAR_AGENT_CHAT_MAX_COMPLETION_TOKENS", "1200"))
+    chat_legacy_max_tokens: int = int(os.getenv("LUNAR_AGENT_CHAT_LEGACY_MAX_TOKENS", "900"))
+    max_tool_rounds: int = int(os.getenv("LUNAR_AGENT_MAX_TOOL_ROUNDS", "5"))
+    max_tool_calls_per_turn: int = int(os.getenv("LUNAR_AGENT_MAX_TOOL_CALLS_PER_TURN", "8"))
+    max_tool_result_chars: int = int(os.getenv("LUNAR_AGENT_MAX_TOOL_RESULT_CHARS", "9000"))
+    reply_max_chars: int = int(os.getenv("LUNAR_AGENT_REPLY_MAX_CHARS", "4800"))
     area_risk_web_research_enabled: bool = os.getenv("LUNAR_AGENT_AREA_RISK_WEB_RESEARCH_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     area_risk_model: str = os.getenv("LUNAR_AGENT_AREA_RISK_MODEL", "gpt-5")
     area_risk_search_context_size: str = os.getenv("LUNAR_AGENT_AREA_RISK_SEARCH_CONTEXT_SIZE", "medium")

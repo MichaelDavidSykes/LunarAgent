@@ -2,6 +2,9 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+EXPLORER_AGENT_MESSAGE_MAX_CHARS = 2800
+EXPLORER_AGENT_HISTORY_MAX_MESSAGES = 10
+
 
 class ChatMessage(BaseModel):
     role: str = Field(..., description="assistant or user")
@@ -11,11 +14,11 @@ class ChatMessage(BaseModel):
 class ExplorerAgentRespondRequest(BaseModel):
     sessionId: Optional[str] = Field(default=None)
     allowUiActions: Optional[bool] = Field(default=False)
-    conversationHistory: List[ChatMessage] = Field(default_factory=list)
+    conversationHistory: List[ChatMessage] = Field(default_factory=list, max_length=EXPLORER_AGENT_HISTORY_MAX_MESSAGES)
     queryPreview: str = Field(..., min_length=1, max_length=400)
     queryContext: Dict[str, Any] = Field(default_factory=dict)
     querySummary: Dict[str, Any] = Field(default_factory=dict)
-    currentUserMessage: str = Field(..., min_length=1, max_length=1600)
+    currentUserMessage: str = Field(..., min_length=1, max_length=EXPLORER_AGENT_MESSAGE_MAX_CHARS)
 
 
 class ExplorerAgentRespondResponse(BaseModel):

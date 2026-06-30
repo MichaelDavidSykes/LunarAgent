@@ -12,6 +12,11 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
+EXPLORER_AGENT_USER_MESSAGE_MAX_CHARS = 2800
+EXPLORER_AGENT_REPLY_MAX_CHARS = 4800
+EXPLORER_AGENT_MAX_COMPLETION_TOKEN_CAP = 2000
+EXPLORER_AGENT_MAX_LEGACY_TOKEN_CAP = 1400
+
 
 def _trim_text(value: Any, max_len: int = 240) -> str:
     text = str(value or "").strip()
@@ -39,6 +44,46 @@ def _safe_http_url(value: Any, max_len: int = 500) -> str:
     ):
         return ""
     return text
+
+
+def _bounded_chat_completion_tokens() -> int:
+    configured = int(settings.chat_max_completion_tokens or 1200)
+    return max(400, min(configured, EXPLORER_AGENT_MAX_COMPLETION_TOKEN_CAP))
+
+
+def _bounded_legacy_chat_tokens() -> int:
+    configured = int(settings.chat_legacy_max_tokens or 900)
+    return max(300, min(configured, EXPLORER_AGENT_MAX_LEGACY_TOKEN_CAP))
+
+
+def _reply_char_limit() -> int:
+    return max(1200, min(int(settings.reply_max_chars or EXPLORER_AGENT_REPLY_MAX_CHARS), 7000))
+
+
+def _max_tool_rounds() -> int:
+    return max(2, min(int(settings.max_tool_rounds or 5), 6))
+
+
+def _max_tool_calls_per_turn() -> int:
+    return max(2, min(int(settings.max_tool_calls_per_turn or 8), 12))
+
+
+def _tool_result_char_limit() -> int:
+    return max(2500, min(int(settings.max_tool_result_chars or 9000), 16000))
+
+
+def _bounded_tool_result_content(result: Dict[str, Any]) -> str:
+    content = json.dumps(result, ensure_ascii=False)
+    limit = _tool_result_char_limit()
+    if len(content) <= limit:
+        return content
+    trimmed = {
+        "tool": result.get("tool") if isinstance(result, dict) else None,
+        "status": result.get("status") if isinstance(result, dict) else "truncated",
+        "truncated": True,
+        "summary": _trim_text(result.get("summary") or result.get("answer") or result, max(800, limit - 500)),
+    }
+    return _trim_text(json.dumps(trimmed, ensure_ascii=False), limit)
 
 
 def _strip_code_fences(text: str) -> str:
@@ -76,7 +121,7 @@ def _safe_parse_json_object(text: str) -> Optional[Dict[str, Any]]:
 
 
 def _extract_wrapped_reply_payload(value: Any) -> Optional[Dict[str, Any]]:
-    text = _trim_text(value, 12000)
+    text = _trim_text(value, _reply_char_limit())
     if not text:
         return None
 
@@ -467,7 +512,7 @@ def build_prompt_messages(
             "Do not wrap the JSON in code fences.",
         ],
         "conversationHistory": conversation_history,
-        "currentUserMessage": _trim_text(user_message, 1600),
+        "currentUserMessage": _trim_text(user_message, EXPLORER_AGENT_USER_MESSAGE_MAX_CHARS),
         "queryPreview": _trim_text(query_preview, 400),
         "queryContext": context,
         "querySummary": summary,
@@ -481,7 +526,7 @@ def build_prompt_messages(
 
 def normalize_response_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     wrapped_reply_payload = _extract_wrapped_reply_payload(payload.get("reply"))
-    reply = _normalize_reply_text(payload.get("reply"), 12000)
+    reply = _normalize_reply_text(payload.get("reply"), _reply_char_limit())
     actions = []
     for action in payload.get("actions") or (wrapped_reply_payload or {}).get("actions") or []:
         normalized = _normalize_action(action)
@@ -510,7 +555,7 @@ def normalize_model_response(raw_text: str) -> Dict[str, Any]:
     parsed = _safe_parse_json_object(raw_text)
     if not isinstance(parsed, dict):
         return {
-            "reply": _trim_text(raw_text, 12000) or "I couldn't produce a structured answer for this query yet.",
+            "reply": _trim_text(raw_text, _reply_char_limit()) or "I couldn't produce a structured answer for this query yet.",
             "actions": [],
             "followUps": [],
         }
@@ -557,11 +602,11 @@ def _latest_user_request_text(messages: List[Dict[str, Any]]) -> str:
         text = _extract_text_from_content(content)
         parsed = _safe_parse_json_object(text)
         if isinstance(parsed, dict):
-            current = _trim_text(parsed.get("currentUserMessage"), 1600)
+            current = _trim_text(parsed.get("currentUserMessage"), EXPLORER_AGENT_USER_MESSAGE_MAX_CHARS)
             if current:
                 return current
         if text:
-            return _trim_text(text, 1600)
+            return _trim_text(text, EXPLORER_AGENT_USER_MESSAGE_MAX_CHARS)
     return ""
 
 
@@ -661,7 +706,7 @@ def _conversation_search_text(messages: List[Dict[str, Any]], max_len: int = 900
         text = _extract_text_from_content(message.get("content"))
         parsed = _safe_parse_json_object(text)
         if isinstance(parsed, dict):
-            text = _trim_text(parsed.get("currentUserMessage") or "", 1600)
+            text = _trim_text(parsed.get("currentUserMessage") or "", EXPLORER_AGENT_USER_MESSAGE_MAX_CHARS)
             history = parsed.get("conversationHistory")
             if isinstance(history, list):
                 for item in history[-6:]:
@@ -1000,13 +1045,13 @@ def _extract_text_from_chat_response(data: Dict[str, Any]) -> str:
         if isinstance(message, dict):
             content_text = _extract_text_from_content(message.get("content"))
             if content_text:
-                return content_text
+                return _trim_text(content_text, _reply_char_limit())
             refusal = message.get("refusal")
             if isinstance(refusal, str) and refusal.strip():
-                return refusal.strip()
+                return _trim_text(refusal, _reply_char_limit())
         choice_text = first_choice.get("text") if isinstance(first_choice, dict) else None
         if isinstance(choice_text, str) and choice_text.strip():
-            return choice_text.strip()
+            return _trim_text(choice_text, _reply_char_limit())
     return ""
 
 
@@ -1706,11 +1751,13 @@ async def _chat_completion_request(
         "model": model_name,
         "messages": messages,
     }
+    completion_token_limit = _bounded_chat_completion_tokens()
+    legacy_token_limit = _bounded_legacy_chat_tokens()
     if _uses_completion_token_limit(model_name):
-        payload["max_completion_tokens"] = 1200
+        payload["max_completion_tokens"] = completion_token_limit
     else:
         payload["temperature"] = 0.2
-        payload["max_tokens"] = 900
+        payload["max_tokens"] = legacy_token_limit
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -1727,7 +1774,7 @@ async def _chat_completion_request(
             retry_payload = dict(request_payload)
             if "max_tokens" in body:
                 retry_payload.pop("max_tokens", None)
-                retry_payload["max_completion_tokens"] = 1200
+                retry_payload["max_completion_tokens"] = completion_token_limit
             if "temperature" in body:
                 retry_payload.pop("temperature", None)
             if retry_payload == request_payload:
@@ -1820,7 +1867,8 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
     tools = _tool_specs()
     saw_tool_result = False
     wants_public_web_context = _request_wants_public_web_context(working_messages)
-    for _ in range(6):
+    tool_call_count = 0
+    for _ in range(_max_tool_rounds()):
         try:
             data = await _chat_completion_request(working_messages, tools=tools)
         except Exception:
@@ -1835,7 +1883,7 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
                         working_messages.append({
                             "role": "tool",
                             "tool_call_id": "rescue-search",
-                            "content": json.dumps(rescue_result, ensure_ascii=False),
+                            "content": _bounded_tool_result_content(rescue_result),
                         })
                     except Exception:
                         pass
@@ -1851,14 +1899,22 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
         content_text = _extract_text_from_content(message.get("content"))
 
         if isinstance(tool_calls, list) and tool_calls:
+            remaining_tool_calls = _max_tool_calls_per_turn() - tool_call_count
+            if remaining_tool_calls <= 0:
+                working_messages.append({
+                    "role": "system",
+                    "content": "Tool-call budget reached for this response. Synthesize the available evidence now.",
+                })
+                continue
+            bounded_tool_calls = tool_calls[:remaining_tool_calls]
             assistant_message: Dict[str, Any] = {
                 "role": "assistant",
                 "content": content_text or "",
-                "tool_calls": tool_calls,
+                "tool_calls": bounded_tool_calls,
             }
             working_messages.append(assistant_message)
 
-            for tool_call in tool_calls:
+            for tool_call in bounded_tool_calls:
                 if not isinstance(tool_call, dict):
                     continue
                 tool_id = str(tool_call.get("id") or "").strip()
@@ -1876,10 +1932,11 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
                     result = {"error": str(exc)}
 
                 saw_tool_result = True
+                tool_call_count += 1
                 working_messages.append({
                     "role": "tool",
                     "tool_call_id": tool_id,
-                    "content": json.dumps(result, ensure_ascii=False),
+                    "content": _bounded_tool_result_content(result),
                 })
             continue
 
@@ -1921,7 +1978,7 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
                     ),
                 })
                 continue
-            return content_text
+            return _trim_text(content_text, _reply_char_limit())
 
     if saw_tool_result:
         if not _tool_payloads_have_intelligence_evidence(working_messages):
@@ -1934,7 +1991,7 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
                 working_messages.append({
                     "role": "tool",
                     "tool_call_id": "rescue-search",
-                    "content": json.dumps(rescue_result, ensure_ascii=False),
+                    "content": _bounded_tool_result_content(rescue_result),
                 })
             except Exception:
                 pass
