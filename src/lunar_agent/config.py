@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     web_reasoning_effort: str = os.getenv("LUNAR_AGENT_WEB_REASONING_EFFORT", "low")
     web_max_output_tokens: int = int(os.getenv("LUNAR_AGENT_WEB_MAX_OUTPUT_TOKENS", "1000"))
     area_risk_web_research_enabled: bool = os.getenv("LUNAR_AGENT_AREA_RISK_WEB_RESEARCH_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-    area_risk_model: str = os.getenv("LUNAR_AGENT_AREA_RISK_MODEL", "gpt-5-mini")
+    area_risk_model: str = os.getenv("LUNAR_AGENT_AREA_RISK_MODEL", "gpt-5")
     area_risk_search_context_size: str = os.getenv("LUNAR_AGENT_AREA_RISK_SEARCH_CONTEXT_SIZE", "medium")
     area_risk_reasoning_effort: str = os.getenv("LUNAR_AGENT_AREA_RISK_REASONING_EFFORT", "low")
     area_risk_max_output_tokens: int = int(os.getenv("LUNAR_AGENT_AREA_RISK_MAX_OUTPUT_TOKENS", "700"))
