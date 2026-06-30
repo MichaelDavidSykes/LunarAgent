@@ -1836,8 +1836,11 @@ async def run_openai_web_research(
                 parsed_text = _extract_responses_text(data)
                 if parsed_text:
                     return parsed_text
-                last_error = "Responses API returned no text"
-                continue
+                return json.dumps({
+                    "summary": "Public web research returned no extractable text for this query.",
+                    "findings": [],
+                    "sources": [],
+                })
             last_error = f"Responses API returned HTTP {response.status_code}: {response.text[:400]}"
     raise RuntimeError(last_error or "Responses API web research failed")
 
