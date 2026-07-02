@@ -361,6 +361,18 @@ def test_normalize_model_response_falls_back_to_plain_text_for_unstructured_outp
     }
 
 
+def test_normalize_model_response_strips_leaked_followups_from_plain_text():
+    payload = normalize_model_response(
+        'No, I did not write KQL for that.\n\nfollow_ups: [ "Show me the AQL logic?", "Search wider graph?" ]'
+    )
+
+    assert payload == {
+        "reply": "No, I did not write KQL for that.",
+        "actions": [],
+        "followUps": [],
+    }
+
+
 def test_build_prompt_messages_keeps_ui_actions_disabled_until_allowed():
     messages = build_prompt_messages(
         session_id="session-1",
@@ -382,6 +394,7 @@ def test_build_prompt_messages_keeps_ui_actions_disabled_until_allowed():
     assert "save_and_apply_graph_query_scope" in prompt_payload["responseShape"]["actions"][0]["type"]
     assert prompt_payload["conversationHistory"] == [{"role": "user", "content": "What matters?"}]
     assert any("allowUiActions=false" in instruction for instruction in prompt_payload["instructions"])
+    assert any("KQL" in item and "AQL" in item for item in prompt_payload["toolPolicy"])
 
 
 def test_build_prompt_messages_declares_allowed_actions_when_enabled():

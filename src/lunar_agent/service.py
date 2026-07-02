@@ -148,7 +148,7 @@ def _normalize_reply_text(value: Any, max_len: int = 12000) -> str:
         if next_text == text:
             break
         text = next_text
-    return text
+    return _strip_leaked_response_fields(text)
 
 
 def _extract_responses_text(data: Dict[str, Any]) -> str:
@@ -251,6 +251,23 @@ def _normalize_module_key(value: Any) -> Optional[str]:
         return None
     return f"module-{text}"
 
+
+
+
+_LEAKED_RESPONSE_FIELD_PATTERN = re.compile(
+    r"(?:\n|\A)\s*(?:follow_ups|followUps|actions)\s*:\s*(?:\[[\s\S]*?\]|\{[\s\S]*?\})\s*$",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_leaked_response_fields(text: str) -> str:
+    cleaned = str(text or "").strip()
+    for _ in range(3):
+        next_cleaned = _LEAKED_RESPONSE_FIELD_PATTERN.sub("", cleaned).strip()
+        if next_cleaned == cleaned:
+            break
+        cleaned = next_cleaned
+    return cleaned
 
 _ACTION_WRITE_KEYWORD_PATTERN = re.compile(
     r"\b(INSERT|UPDATE|REPLACE|REMOVE|UPSERT|TRUNCATE|DROP|CREATE|ALTER|GRANT|REVOKE|IMPORT|EXPORT)\b",
@@ -425,6 +442,7 @@ def build_prompt_messages(
     system_prompt = (
         "You are Lunar Explorer Agent inside LunarChain Explorer. "
         "Start as a normal intelligence chat; do not claim you loaded or inspected the current Explorer scope unless you actually used a scope tool. "
+        "Explorer uses ArangoDB AQL for graph queries, not KQL; never call Explorer graph work KQL. "
         "Your primary job is to answer intelligence questions with grounded evidence. "
         "When a user asks for intelligence beyond the current Explorer scope, investigate the wider LunarGraph with the available graph tools first. "
         "For broad, current, or open-ended questions, supplement the graph with public web research before answering. "
@@ -519,6 +537,7 @@ def build_prompt_messages(
             "If the question asks what the current scoped intelligence actually says, inspect scoped reports before answering.",
             "Use list_scope_reports for broad orientation, search_scope_reports for entity or phrase questions, and get_scope_report_detail before making a precise report-level claim.",
             "Prefer report text and explicit relationship evidence over high-level counters.",
+            "If the user asks whether you wrote or ran KQL, clarify that Explorer uses AQL rather than KQL; say whether you inspected scoped report/entity tools or ran a custom bounded AQL query only if run_graph_read_query was actually used in this turn.",
         ],
         "responseShape": {
             "reply": "markdown string",
@@ -558,7 +577,7 @@ def build_prompt_messages(
             "For graph-wide investigations, include at most one apply_graph_query_scope action labelled 'Scope Explorer to this investigation' when explorerScope is available.",
             "For explicit save-query requests, include at most one save_and_apply_graph_query_scope action labelled 'Save query and scope Explorer' when explorerScope is available.",
             "Keep replies readable in a chat window.",
-            "Do not wrap the JSON in code fences.",
+            "Do not write literal 'follow_ups:' or 'actions:' lines inside reply text; put follow-ups only in the follow_ups array. Do not wrap the JSON in code fences.",
         ],
         "conversationHistory": conversation_history,
         "currentUserMessage": _trim_text(user_message, EXPLORER_AGENT_USER_MESSAGE_MAX_CHARS),
@@ -604,7 +623,7 @@ def normalize_model_response(raw_text: str) -> Dict[str, Any]:
     parsed = _safe_parse_json_object(raw_text)
     if not isinstance(parsed, dict):
         return {
-            "reply": _trim_text(raw_text, _reply_char_limit()) or "I couldn't produce a structured answer for this query yet.",
+            "reply": _strip_leaked_response_fields(_trim_text(raw_text, _reply_char_limit())) or "I couldn't produce a structured answer for this query yet.",
             "actions": [],
             "followUps": [],
         }
