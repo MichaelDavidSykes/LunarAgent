@@ -844,6 +844,27 @@ def _infer_rescue_graph_search_arguments(messages: List[Dict[str, Any]]) -> Dict
     }
 
 
+async def _synthesize_with_rescue_tool_evidence(
+    working_messages: List[Dict[str, Any]],
+    session_id: Optional[str],
+) -> str:
+    if not _tool_payloads_have_intelligence_evidence(working_messages):
+        try:
+            rescue_result = await _execute_tool_call(
+                "search_intelligence_graph",
+                _infer_rescue_graph_search_arguments(working_messages),
+                session_id,
+            )
+            working_messages.append({
+                "role": "tool",
+                "tool_call_id": "rescue-search",
+                "content": _bounded_tool_result_content(rescue_result),
+            })
+        except Exception:
+            pass
+    return _synthesize_tool_backed_response(working_messages)
+
+
 def _tool_payloads_have_graph_evidence(messages: List[Dict[str, Any]]) -> bool:
     for payload in _tool_result_payloads(messages):
         if payload.get("explorerScope") or payload.get("reports") or payload.get("matches") or payload.get("report"):
@@ -2022,21 +2043,7 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
             data = await _chat_completion_request(working_messages, tools=tools)
         except Exception:
             if saw_tool_result:
-                if not _tool_payloads_have_intelligence_evidence(working_messages):
-                    try:
-                        rescue_result = await _execute_tool_call(
-                            "search_intelligence_graph",
-                            _infer_rescue_graph_search_arguments(working_messages),
-                            session_id,
-                        )
-                        working_messages.append({
-                            "role": "tool",
-                            "tool_call_id": "rescue-search",
-                            "content": _bounded_tool_result_content(rescue_result),
-                        })
-                    except Exception:
-                        pass
-                return _synthesize_tool_backed_response(working_messages)
+                return await _synthesize_with_rescue_tool_evidence(working_messages, session_id)
             return await run_openai_analysis(messages)
         choices = data.get("choices")
         first_choice = choices[0] if isinstance(choices, list) and choices else {}
@@ -2131,21 +2138,7 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
             return _trim_text(content_text, _reply_char_limit())
 
     if saw_tool_result:
-        if not _tool_payloads_have_intelligence_evidence(working_messages):
-            try:
-                rescue_result = await _execute_tool_call(
-                    "search_intelligence_graph",
-                    _infer_rescue_graph_search_arguments(working_messages),
-                    session_id,
-                )
-                working_messages.append({
-                    "role": "tool",
-                    "tool_call_id": "rescue-search",
-                    "content": _bounded_tool_result_content(rescue_result),
-                })
-            except Exception:
-                pass
-        return _synthesize_tool_backed_response(working_messages)
+        return await _synthesize_with_rescue_tool_evidence(working_messages, session_id)
     return await run_openai_analysis(messages)
 
 
