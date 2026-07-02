@@ -105,6 +105,37 @@ def test_normalize_response_payload_accepts_graph_scope_action():
     ]
 
 
+def test_normalize_response_payload_accepts_save_and_apply_graph_scope_action():
+    payload = normalize_response_payload(
+        {
+            "reply": "Prepared a saved query.",
+            "actions": [
+                {
+                    "type": "save_and_apply_graph_query_scope",
+                    "label": "Save query and scope Explorer",
+                    "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+                    "queryPreview": "Graph investigation: South Africa",
+                    "savedQueryName": "South Africa risk watch",
+                    "savedQueryDescription": "Created from a natural-language Explorer Agent prompt.",
+                    "alertingEnabled": False,
+                }
+            ],
+        }
+    )
+
+    assert payload["actions"] == [
+        {
+            "type": "save_and_apply_graph_query_scope",
+            "label": "Save query and scope Explorer",
+            "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+            "queryPreview": "Graph investigation: South Africa",
+            "savedQueryName": "South Africa risk watch",
+            "savedQueryDescription": "Created from a natural-language Explorer Agent prompt.",
+            "alertingEnabled": False,
+        }
+    ]
+
+
 def test_tool_backed_fallback_returns_structured_graph_scope_summary():
     raw = service_module._synthesize_tool_backed_response(
         [
@@ -347,7 +378,8 @@ def test_build_prompt_messages_keeps_ui_actions_disabled_until_allowed():
     assert prompt_payload["allowUiActions"] is False
     assert prompt_payload["allowedActions"] == []
     assert prompt_payload["alwaysAllowedOptInActions"][0]["type"] == "apply_graph_query_scope"
-    assert prompt_payload["responseShape"]["actions"][0]["type"].endswith("apply_graph_query_scope")
+    assert "apply_graph_query_scope" in prompt_payload["responseShape"]["actions"][0]["type"]
+    assert "save_and_apply_graph_query_scope" in prompt_payload["responseShape"]["actions"][0]["type"]
     assert prompt_payload["conversationHistory"] == [{"role": "user", "content": "What matters?"}]
     assert any("allowUiActions=false" in instruction for instruction in prompt_payload["instructions"])
 
@@ -373,6 +405,7 @@ def test_build_prompt_messages_declares_allowed_actions_when_enabled():
         "clear_module_filters",
         "open_map",
         "apply_graph_query_scope",
+        "save_and_apply_graph_query_scope",
     ]
     assert any("search_intelligence_graph" in item for item in prompt_payload["toolPolicy"])
     assert any("search_public_web" in item for item in prompt_payload["toolPolicy"])

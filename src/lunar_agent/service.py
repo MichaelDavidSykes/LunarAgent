@@ -318,6 +318,8 @@ def _default_action_label(action_type: str, country_name: Optional[str], module_
         return "Open flat map"
     if action_type == "apply_graph_query_scope":
         return "Scope Explorer to this investigation"
+    if action_type == "save_and_apply_graph_query_scope":
+        return "Save query and scope Explorer"
     return "Run action"
 
 
@@ -333,6 +335,7 @@ def _normalize_action(action: Any) -> Optional[Dict[str, Any]]:
         "clear_module_filters",
         "open_map",
         "apply_graph_query_scope",
+        "save_and_apply_graph_query_scope",
     }:
         return None
 
@@ -357,7 +360,7 @@ def _normalize_action(action: Any) -> Optional[Dict[str, Any]]:
         60000,
     )
     query_preview = _trim_text(action.get("queryPreview") or action.get("query_preview"), 600) or None
-    if action_type == "apply_graph_query_scope" and not _looks_like_read_only_aql(compiled_aql):
+    if action_type in {"apply_graph_query_scope", "save_and_apply_graph_query_scope"} and not _looks_like_read_only_aql(compiled_aql):
         return None
 
     reason = _trim_text(action.get("reason"), 180) or None
@@ -375,10 +378,38 @@ def _normalize_action(action: Any) -> Optional[Dict[str, Any]]:
         payload["countryCode"] = country_code
     if module_keys:
         payload["moduleKeys"] = module_keys
-    if action_type == "apply_graph_query_scope":
+    if action_type in {"apply_graph_query_scope", "save_and_apply_graph_query_scope"}:
         payload["compiledAql"] = compiled_aql
         if query_preview:
             payload["queryPreview"] = query_preview
+    if action_type == "save_and_apply_graph_query_scope":
+        saved_query_name = _trim_text(
+            action.get("savedQueryName")
+            or action.get("saved_query_name")
+            or action.get("name")
+            or query_preview
+            or label,
+            160,
+        )
+        saved_query_description = _trim_text(
+            action.get("savedQueryDescription")
+            or action.get("saved_query_description")
+            or reason
+            or "",
+            600,
+        )
+        if saved_query_name:
+            payload["savedQueryName"] = saved_query_name
+        if saved_query_description:
+            payload["savedQueryDescription"] = saved_query_description
+        if isinstance(action.get("alertingEnabled"), bool):
+            payload["alertingEnabled"] = action.get("alertingEnabled")
+        elif isinstance(action.get("alerting_enabled"), bool):
+            payload["alertingEnabled"] = action.get("alerting_enabled")
+        if isinstance(action.get("dynamicEndDate"), bool):
+            payload["dynamicEndDate"] = action.get("dynamicEndDate")
+        elif isinstance(action.get("dynamic_end_date"), bool):
+            payload["dynamicEndDate"] = action.get("dynamic_end_date")
     return payload
 
 
@@ -404,6 +435,7 @@ def build_prompt_messages(
         "Never make the data model the answer: do not describe graph structure, node counts, location buckets, result rows, or 'located-at references' unless the user explicitly asks about coverage or data quality. "
         "Do not recommend generic filters, pivots, map views, or UI changes unless the user explicitly asks for them. "
         "You may include one opt-in apply_graph_query_scope action after a successful graph-wide search so the user can scope Explorer to your investigation. "
+        "If the user explicitly asks to save/store/create a query from their natural-language request, include a save_and_apply_graph_query_scope action instead so Explorer can save it and apply the same scope. "
         "Default to actions=[] and follow_ups=[]. "
         "Return strict JSON only."
     )
@@ -449,6 +481,11 @@ def build_prompt_messages(
                 "when": "Use after search_intelligence_graph returns explorerScope and the answer is based on a graph-wide investigation beyond the current Explorer scope. This must be an opt-in button, never automatic.",
                 "requiredFields": ["compiledAql", "queryPreview"],
             },
+            {
+                "type": "save_and_apply_graph_query_scope",
+                "when": "Use only when the user explicitly asks to save/store/create a saved query from a natural-language investigation and scope Explorer to it. This must be an opt-in button, never automatic.",
+                "requiredFields": ["compiledAql", "queryPreview", "savedQueryName"],
+            },
         ] if allow_ui_actions else []),
         "alwaysAllowedOptInActions": [
             {
@@ -456,6 +493,12 @@ def build_prompt_messages(
                 "when": "Allowed even when allowUiActions=false, but only after search_intelligence_graph returns explorerScope for this turn.",
                 "requiredFields": ["compiledAql", "queryPreview"],
                 "label": "Scope Explorer to this investigation",
+            },
+            {
+                "type": "save_and_apply_graph_query_scope",
+                "when": "Allowed even when allowUiActions=false, but only when the user explicitly asks to save a query and search_intelligence_graph returned explorerScope for this turn.",
+                "requiredFields": ["compiledAql", "queryPreview", "savedQueryName"],
+                "label": "Save query and scope Explorer",
             }
         ],
         "toolPolicy": [
@@ -467,6 +510,7 @@ def build_prompt_messages(
             "Call graph_schema_context before writing custom AQL if you need schema, collection, relationship, or traversal guidance.",
             "Prefer search_intelligence_graph for report-centric investigations; it returns grounded snippets and an Explorer-compatible scope query.",
             "Use search_public_web for current public reporting, context beyond LunarGraph, or when graph evidence is sparse/stale; always keep source URLs with claims derived from web research.",
+            "When the user asks to save/store/create a query from natural language, first investigate with search_intelligence_graph, then return save_and_apply_graph_query_scope using explorerScope.compiledAql exactly and a concise savedQueryName/savedQueryDescription.",
             "Do not copy the current Explorer date range into created_from/created_to for a graph-wide search unless the user explicitly asks to constrain report publication dates. Event dates such as 'on the 30th' should be search terms, not report-created date bounds.",
             "Resolve relative dates using currentDateUtc; for example, 'on the 30th' should become an explicit ISO date when the month/year are clear from context.",
             "Use run_graph_read_query for custom, bounded, read-only AQL when search_intelligence_graph is insufficient.",
@@ -480,14 +524,18 @@ def build_prompt_messages(
             "reply": "markdown string",
             "actions": [
                 {
-                    "type": "focus_country | clear_country_focus | apply_module_filter | clear_module_filters | open_map | apply_graph_query_scope",
+                    "type": "focus_country | clear_country_focus | apply_module_filter | clear_module_filters | open_map | apply_graph_query_scope | save_and_apply_graph_query_scope",
                     "label": "short button label",
                     "reason": "short explanation",
                     "countryName": "optional string",
                     "countryCode": "optional ISO-2 string",
                     "moduleKeys": ["optional module keys like module-maritime"],
-                    "compiledAql": "required only for apply_graph_query_scope; use explorerScope.compiledAql exactly",
-                    "queryPreview": "required only for apply_graph_query_scope; use explorerScope.queryPreview",
+                    "compiledAql": "required for apply_graph_query_scope and save_and_apply_graph_query_scope; use explorerScope.compiledAql exactly",
+                    "queryPreview": "required for apply_graph_query_scope and save_and_apply_graph_query_scope; use explorerScope.queryPreview",
+                    "savedQueryName": "required only for save_and_apply_graph_query_scope; concise human-readable saved query name",
+                    "savedQueryDescription": "optional saved-query description explaining the natural-language intent",
+                    "alertingEnabled": "optional boolean; default true",
+                    "dynamicEndDate": "optional boolean; default false unless the compiled query is truly dynamic",
                 }
             ],
             "follow_ups": ["short suggested follow-up questions"],
@@ -503,11 +551,12 @@ def build_prompt_messages(
             "For current-scope intelligence questions, do not answer until you have inspected at least one scoped report tool result in this turn.",
             (
                 "If allowUiActions=false, return no ordinary UI actions and no UI recommendations. "
-                "The only exception is one apply_graph_query_scope action using explorerScope.compiledAql from search_intelligence_graph."
+                "The only exceptions are one apply_graph_query_scope action or one save_and_apply_graph_query_scope action using explorerScope.compiledAql from search_intelligence_graph."
             ),
             "Default to actions=[] and follow_ups=[].",
             "Only include actions if the user explicitly asks you to change or inspect the Explorer UI and allowUiActions=true.",
             "For graph-wide investigations, include at most one apply_graph_query_scope action labelled 'Scope Explorer to this investigation' when explorerScope is available.",
+            "For explicit save-query requests, include at most one save_and_apply_graph_query_scope action labelled 'Save query and scope Explorer' when explorerScope is available.",
             "Keep replies readable in a chat window.",
             "Do not wrap the JSON in code fences.",
         ],
@@ -622,6 +671,25 @@ def _request_wants_risk_areas(text: str) -> bool:
     return any(fragment in normalized for fragment in (
         "risk area", "risk areas", "hotspot", "hotspots", "where", "which areas", "locations", "places",
     ))
+
+
+def _request_wants_saved_query(text: str) -> bool:
+    normalized = str(text or "").lower()
+    if not normalized:
+        return False
+    return bool(
+        re.search(r"\b(save|store|create|make)\b.{0,80}\b(query|saved query|scope|investigation|search)\b", normalized)
+        or re.search(r"\b(saved query|save this query|save it as a query|save and scope|save .* explorer)\b", normalized)
+    )
+
+
+def _saved_query_name_from_request(request: str, query_preview: str) -> str:
+    text = _trim_text(request, 120)
+    text = re.sub(r"\b(?:please|can you|could you|save|store|create|make|query|saved query|scope|explorer|for|about)\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" .,:;-")
+    if text:
+        return _trim_text(text[0].upper() + text[1:], 110)
+    return _trim_text(query_preview or "Agent generated query", 110)
 
 
 def _payload_report_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -966,13 +1034,25 @@ def _synthesize_tool_backed_response(messages: List[Dict[str, Any]]) -> str:
 
             actions: List[Dict[str, Any]] = []
             if explorer_scope and explorer_scope.get("compiledAql"):
-                actions.append({
-                    "type": "apply_graph_query_scope",
-                    "label": "Scope Explorer to this investigation",
-                    "reason": "Inspect the reports and entities returned by the graph-wide lookup.",
-                    "compiledAql": explorer_scope.get("compiledAql"),
-                    "queryPreview": explorer_scope.get("queryPreview") or "Graph investigation",
-                })
+                scope_preview = explorer_scope.get("queryPreview") or "Graph investigation"
+                if _request_wants_saved_query(latest_request):
+                    actions.append({
+                        "type": "save_and_apply_graph_query_scope",
+                        "label": "Save query and scope Explorer",
+                        "reason": "Save this natural-language investigation as a client query and inspect its returned reports.",
+                        "compiledAql": explorer_scope.get("compiledAql"),
+                        "queryPreview": scope_preview,
+                        "savedQueryName": _saved_query_name_from_request(latest_request, scope_preview),
+                        "savedQueryDescription": _trim_text(latest_request, 480),
+                    })
+                else:
+                    actions.append({
+                        "type": "apply_graph_query_scope",
+                        "label": "Scope Explorer to this investigation",
+                        "reason": "Inspect the reports and entities returned by the graph-wide lookup.",
+                        "compiledAql": explorer_scope.get("compiledAql"),
+                        "queryPreview": scope_preview,
+                    })
             return json.dumps({
                 "reply": "\n\n".join(lines),
                 "actions": actions[:1],
