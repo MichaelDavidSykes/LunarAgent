@@ -395,6 +395,8 @@ def test_build_prompt_messages_keeps_ui_actions_disabled_until_allowed():
     assert prompt_payload["conversationHistory"] == [{"role": "user", "content": "What matters?"}]
     assert any("allowUiActions=false" in instruction for instruction in prompt_payload["instructions"])
     assert any("KQL" in item and "AQL" in item for item in prompt_payload["toolPolicy"])
+    assert any("full autonomy" in item for item in prompt_payload["toolPolicy"])
+    assert any("do not ask permission" in item for item in prompt_payload["instructions"])
 
 
 def test_build_prompt_messages_declares_allowed_actions_when_enabled():
@@ -422,6 +424,7 @@ def test_build_prompt_messages_declares_allowed_actions_when_enabled():
     ]
     assert any("search_intelligence_graph" in item for item in prompt_payload["toolPolicy"])
     assert any("search_public_web" in item for item in prompt_payload["toolPolicy"])
+    assert any("When unsure between scoped data and the full graph" in item for item in prompt_payload["toolPolicy"])
 
 
 def test_tool_specs_include_public_web_search():
@@ -571,6 +574,87 @@ def test_tool_aware_analysis_requires_web_after_graph_for_current_public_context
 
     assert [tool_name for tool_name, *_ in executed_tools] == ["search_intelligence_graph", "search_public_web"]
     assert "public web" in payload["reply"].lower()
+
+
+def test_tool_aware_analysis_broad_request_does_not_stop_at_current_scope(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
+    monkeypatch.setattr(service_module.settings, "web_research_enabled", False)
+
+    calls = []
+    executed_tools = []
+
+    async def fake_chat_completion(messages, tools=None, *, model=None):
+        calls.append({"messages": list(messages), "tools": tools, "model": model})
+        if len(calls) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-scope",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "list_scope_reports",
+                                        "arguments": json.dumps({"limit": 4}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        if len(calls) == 2:
+            return {"choices": [{"message": {"content": "{\"reply\":\"scope-only\",\"actions\":[],\"follow_ups\":[]}"}}]}
+        if len(calls) == 3:
+            last_system = calls[-1]["messages"][-1]["content"]
+            assert "Do not stop at current-scope evidence" in last_system
+            assert "search_intelligence_graph" in last_system
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-graph",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_intelligence_graph",
+                                        "arguments": json.dumps({"query": "South Africa today"}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {"choices": [{"message": {"content": "{\"reply\":\"graph-wide final\",\"actions\":[],\"follow_ups\":[]}"}}]}
+
+    async def fake_execute_tool(tool_name, arguments, session_id):
+        executed_tools.append((tool_name, arguments, session_id))
+        if tool_name == "list_scope_reports":
+            return {"reports": [{"name": "Scoped report", "contentSnippet": "Only the current scope."}]}
+        assert tool_name == "search_intelligence_graph"
+        return {
+            "reports": [{"name": "Wider graph report", "contentSnippet": "Graph-wide South Africa context."}],
+            "explorerScope": {"compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc"},
+        }
+
+    monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
+    monkeypatch.setattr(service_module, "_execute_tool_call", fake_execute_tool)
+
+    raw = asyncio.run(
+        service_module.run_tool_aware_analysis(
+            [{"role": "user", "content": "What's happening in South Africa today?"}],
+            "session-1",
+        )
+    )
+    payload = json.loads(raw)
+
+    assert [tool_name for tool_name, *_ in executed_tools] == ["list_scope_reports", "search_intelligence_graph"]
+    assert payload["reply"] == "graph-wide final"
 
 
 def test_tool_aware_analysis_allows_web_after_attempted_empty_graph_search(monkeypatch):

@@ -520,8 +520,10 @@ def build_prompt_messages(
             }
         ],
         "toolPolicy": [
-            "Use scoped report tools when the question is clearly about the current Explorer results.",
-            "Use graph-wide tools when the user asks to investigate, search, find latest intel, or asks about a topic/entity that may be outside the current Explorer scope.",
+            "You have full autonomy to choose the evidence path: current-scope report tools, wider Intelligence Graph search, custom bounded AQL, public web research, or a combination. Do not ask the user to choose tools when you can decide from the request.",
+            "Use scoped report tools when the question is clearly and only about the current Explorer results.",
+            "Use graph-wide tools when the user asks to investigate, search, find latest intel, asks about a topic/entity that may be outside the current Explorer scope, or when the current scope may be incomplete.",
+            "When unsure between scoped data and the full graph, favor evidence recall: inspect the scope if useful, but also run a wider Intelligence Graph search before answering.",
             "For questions such as 'what is happening in <place/topic>', 'latest', 'today', 'recent', 'news', 'browse/search the web', or other broad public-context requests: call search_intelligence_graph first, then search_public_web, then synthesize both.",
             "For short greetings or non-intelligence small talk, answer conversationally without using current-scope language.",
             "Resolve elliptical follow-ups from conversationHistory. If the user asks 'which individuals', 'what risk areas', 'how far back', or similar after a graph investigation, continue the same investigation/topic rather than starting from the current Explorer scope.",
@@ -561,13 +563,14 @@ def build_prompt_messages(
         },
         "instructions": [
             "Answer the user's question directly and analytically.",
+            "Autonomously decide whether scoped data, full-graph data, custom AQL, public web evidence, or a combination is needed; do not ask permission to broaden from scope to full graph/web when the available tools can answer safely.",
             "Never open by saying you loaded the current Explorer scope unless the current user request explicitly asks about that scope.",
             "Ground claims in the provided summary, relationship evidence, graph query outputs, report-reading tool outputs, and search_public_web outputs only.",
             "Turn graph evidence into a content-level intelligence synthesis: describe the events, actors, risks, locations, timelines, and uncertainties; do not narrate graph mechanics.",
             "If using public web evidence, cite source URLs inline or in a short 'Sources' line. If graph and web evidence diverge, explain the difference by source/timeframe.",
             "For graph-wide requests, do not answer until you have used search_intelligence_graph or run_graph_read_query in this turn.",
             "For broad/current public-context requests, do not answer until you have also used search_public_web in this turn unless web research is unavailable.",
-            "For current-scope intelligence questions, do not answer until you have inspected at least one scoped report tool result in this turn.",
+            "For questions clearly limited to the current Explorer scope, do not answer until you have inspected at least one scoped report tool result in this turn; otherwise use graph-wide tools, web research, or both as needed.",
             (
                 "If allowUiActions=false, return no ordinary UI actions and no UI recommendations. "
                 "The only exceptions are one apply_graph_query_scope action or one save_and_apply_graph_query_scope action using explorerScope.compiledAql from search_intelligence_graph."
@@ -906,6 +909,34 @@ def _request_wants_public_web_context(messages: List[Dict[str, Any]]) -> bool:
     if re.search(r"\b(?:latest|current|currently|today|yesterday|overnight|this week|recent|news|updates|developments)\b", combined):
         return True
     if re.search(r"\bwhat(?:'s| is)?\s+(?:happening|going on|unfolding)\b", combined):
+        return True
+    return False
+
+
+def _request_wants_graph_wide_context(messages: List[Dict[str, Any]]) -> bool:
+    text = _conversation_search_text(messages, max_len=1400)
+    latest = _latest_user_request_text(messages)
+    latest_lower = latest.lower()
+    combined = f"{latest} | {text}".lower()
+    explicitly_scope_limited = _request_mentions_current_scope(combined)
+    explicitly_wide = bool(
+        re.search(
+            r"\b(?:full|whole|entire|wider|broader|complete|all)\s+(?:intelligence\s+)?graph\b",
+            combined,
+        )
+        or re.search(r"\b(?:graph-wide|full-graph|wider graph|broader graph)\b", combined)
+        or re.search(r"\b(?:beyond|outside)\s+(?:the\s+)?(?:current\s+)?scope\b", combined)
+    )
+    if explicitly_wide:
+        return True
+    if explicitly_scope_limited:
+        return False
+    if _request_wants_public_web_context(messages):
+        return True
+    if re.search(
+        r"\b(?:investigate|search|find|look for|look into|research|analyse|analyze|discover|identify)\b",
+        latest_lower,
+    ):
         return True
     return False
 
@@ -1984,6 +2015,7 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
     tools = _tool_specs()
     saw_tool_result = False
     wants_public_web_context = _request_wants_public_web_context(working_messages)
+    wants_graph_wide_context = _request_wants_graph_wide_context(working_messages)
     tool_call_count = 0
     for _ in range(_max_tool_rounds()):
         try:
@@ -2073,12 +2105,13 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
                 working_messages,
                 "run_graph_read_query",
             )
-            if wants_public_web_context and not (_tool_payloads_have_graph_evidence(working_messages) or graph_search_attempted):
+            if wants_graph_wide_context and not graph_search_attempted:
                 working_messages.append({
                     "role": "system",
                     "content": (
-                        "The user is asking for broad/current intelligence. Inspect LunarGraph first with "
-                        "search_intelligence_graph before producing the final answer."
+                        "The user is asking for a broad, potentially out-of-scope, or graph-wide intelligence "
+                        "answer. Do not stop at current-scope evidence. Use search_intelligence_graph or "
+                        "run_graph_read_query before producing the final answer."
                     ),
                 })
                 continue
