@@ -925,13 +925,14 @@ def _request_wants_public_web_context(messages: List[Dict[str, Any]]) -> bool:
         term in combined for term in ("web", "internet", "browse", "google", "public sources", "outside the graph")
     ):
         return False
-    if re.search(r"\b(?:web|internet|browse|browser|search online|public sources|outside the graph)\b", combined):
-        return True
-    if re.search(r"\b(?:latest|current|currently|today|yesterday|overnight|this week|recent|news|updates|developments)\b", combined):
-        return True
-    if re.search(r"\bwhat(?:'s| is)?\s+(?:happening|going on|unfolding)\b", combined):
-        return True
-    return False
+    return any(
+        re.search(pattern, combined)
+        for pattern in (
+            r"\b(?:web|internet|browse|browser|search online|public sources|outside the graph)\b",
+            r"\b(?:latest|current|currently|today|yesterday|overnight|this week|recent|news|updates|developments)\b",
+            r"\bwhat(?:'s| is)?\s+(?:happening|going on|unfolding)\b",
+        )
+    )
 
 
 def _request_wants_graph_wide_context(messages: List[Dict[str, Any]]) -> bool:
@@ -954,12 +955,12 @@ def _request_wants_graph_wide_context(messages: List[Dict[str, Any]]) -> bool:
         return False
     if _request_wants_public_web_context(messages):
         return True
-    if re.search(
-        r"\b(?:investigate|search|find|look for|look into|research|analyse|analyze|discover|identify)\b",
-        latest_lower,
-    ):
-        return True
-    return False
+    return bool(
+        re.search(
+            r"\b(?:investigate|search|find|look for|look into|research|analyse|analyze|discover|identify)\b",
+            latest_lower,
+        )
+    )
 
 
 def _report_content_lines(reports: List[Dict[str, Any]], limit: int = 4) -> List[str]:
