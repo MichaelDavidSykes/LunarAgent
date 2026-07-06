@@ -9,10 +9,9 @@ from urllib.parse import urlparse
 import httpx
 
 from .config import settings
+from .models import EXPLORER_AGENT_MESSAGE_MAX_CHARS
 
 logger = logging.getLogger(__name__)
-
-EXPLORER_AGENT_USER_MESSAGE_MAX_CHARS = 2800
 EXPLORER_AGENT_REPLY_MAX_CHARS = 4800
 EXPLORER_AGENT_MAX_COMPLETION_TOKEN_CAP = 2000
 EXPLORER_AGENT_MAX_LEGACY_TOKEN_CAP = 1400
@@ -583,7 +582,7 @@ def build_prompt_messages(
             "Do not write literal 'follow_ups:' or 'actions:' lines inside reply text; put follow-ups only in the follow_ups array. Do not wrap the JSON in code fences.",
         ],
         "conversationHistory": conversation_history,
-        "currentUserMessage": _trim_text(user_message, EXPLORER_AGENT_USER_MESSAGE_MAX_CHARS),
+        "currentUserMessage": _trim_text(user_message, EXPLORER_AGENT_MESSAGE_MAX_CHARS),
         "queryPreview": _trim_text(query_preview, 400),
         "queryContext": context,
         "querySummary": summary,
@@ -673,11 +672,11 @@ def _latest_user_request_text(messages: List[Dict[str, Any]]) -> str:
         text = _extract_text_from_content(content)
         parsed = _safe_parse_json_object(text)
         if isinstance(parsed, dict):
-            current = _trim_text(parsed.get("currentUserMessage"), EXPLORER_AGENT_USER_MESSAGE_MAX_CHARS)
+            current = _trim_text(parsed.get("currentUserMessage"), EXPLORER_AGENT_MESSAGE_MAX_CHARS)
             if current:
                 return current
         if text:
-            return _trim_text(text, EXPLORER_AGENT_USER_MESSAGE_MAX_CHARS)
+            return _trim_text(text, EXPLORER_AGENT_MESSAGE_MAX_CHARS)
     return ""
 
 
@@ -796,7 +795,7 @@ def _conversation_search_text(messages: List[Dict[str, Any]], max_len: int = 900
         text = _extract_text_from_content(message.get("content"))
         parsed = _safe_parse_json_object(text)
         if isinstance(parsed, dict):
-            text = _trim_text(parsed.get("currentUserMessage") or "", EXPLORER_AGENT_USER_MESSAGE_MAX_CHARS)
+            text = _trim_text(parsed.get("currentUserMessage") or "", EXPLORER_AGENT_MESSAGE_MAX_CHARS)
             history = parsed.get("conversationHistory")
             if isinstance(history, list):
                 for item in history[-6:]:
