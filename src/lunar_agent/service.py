@@ -36,9 +36,7 @@ def _safe_http_url(value: Any, max_len: int = 500) -> str:
         not host
         or host == "localhost"
         or host.endswith(".local")
-        or host.startswith("127.")
-        or host.startswith("10.")
-        or host.startswith("192.168.")
+        or host.startswith(("127.", "10.", "192.168."))
         or re.match(r"^172\.(1[6-9]|2\d|3[0-1])\.", host)
     ):
         return ""
@@ -243,8 +241,7 @@ def _normalize_module_key(value: Any) -> Optional[str]:
     text = str(value or "").strip().lower()
     if not text:
         return None
-    if text.startswith("module-"):
-        text = text[len("module-") :]
+    text = text.removeprefix("module-")
     text = text.replace(" module", "").strip()
     if not text:
         return None
