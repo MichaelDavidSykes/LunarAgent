@@ -186,15 +186,21 @@ def _normalize_text_list(value: Any, max_items: int = 4, max_len: int = 140) -> 
     out: List[str] = []
     seen: set[str] = set()
     for item in candidates:
-        text = _trim_text(item, max_len=max_len).strip()
-        normalized = text.lower()
-        if not text or normalized in seen:
-            continue
-        seen.add(normalized)
-        out.append(text)
+        _append_unique_text(out, seen, item, max_len)
         if len(out) >= max_items:
             break
     return out
+
+
+def _append_unique_text(out: List[str], seen: set[str], value: Any, max_len: int) -> bool:
+    text = _trim_text(value, max_len=max_len).strip()
+    normalized = text.lower()
+    if not text or normalized in seen:
+        return False
+
+    seen.add(normalized)
+    out.append(text)
+    return True
 
 
 def _coerce_finite_float(value: Any) -> Optional[float]:
@@ -729,13 +735,13 @@ def _facet_names(facets: Any, key: str, limit: int = 8) -> List[str]:
     if not isinstance(raw_items, list):
         return []
     names: List[str] = []
+    seen: set[str] = set()
     for item in raw_items:
         if isinstance(item, dict):
-            name = _trim_text(item.get("name"), 100)
+            value = item.get("name")
         else:
-            name = _trim_text(item, 100)
-        if name and name.lower() not in {existing.lower() for existing in names}:
-            names.append(name)
+            value = item
+        _append_unique_text(names, seen, value, 100)
         if len(names) >= limit:
             break
     return names
@@ -748,12 +754,11 @@ def _summary_location_names(summary: Any, limit: int = 6) -> List[str]:
     if not isinstance(locations, list):
         return []
     names: List[str] = []
+    seen: set[str] = set()
     for item in locations:
         if not isinstance(item, dict):
             continue
-        name = _trim_text(item.get("name"), 100)
-        if name and name.lower() not in {existing.lower() for existing in names}:
-            names.append(name)
+        _append_unique_text(names, seen, item.get("name"), 100)
         if len(names) >= limit:
             break
     return names
@@ -761,17 +766,17 @@ def _summary_location_names(summary: Any, limit: int = 6) -> List[str]:
 
 def _report_entity_names(reports: List[Dict[str, Any]], limit: int = 12) -> List[str]:
     names: List[str] = []
+    seen: set[str] = set()
     for report in reports:
         entities = report.get("entities")
         if not isinstance(entities, list):
             continue
         for entity in entities:
             if isinstance(entity, dict):
-                name = _trim_text(entity.get("name") or entity.get("value") or entity.get("pattern"), 100)
+                value = entity.get("name") or entity.get("value") or entity.get("pattern")
             else:
-                name = _trim_text(entity, 100)
-            if name and name.lower() not in {existing.lower() for existing in names}:
-                names.append(name)
+                value = entity
+            _append_unique_text(names, seen, value, 100)
             if len(names) >= limit:
                 return names
     return names
