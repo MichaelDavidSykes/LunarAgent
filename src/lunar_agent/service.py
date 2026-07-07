@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import json
 import logging
 import math
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -69,7 +71,7 @@ def _tool_result_char_limit() -> int:
     return max(2500, min(int(settings.max_tool_result_chars or 9000), 16000))
 
 
-def _bounded_tool_result_content(result: Dict[str, Any]) -> str:
+def _bounded_tool_result_content(result: dict[str, Any]) -> str:
     content = json.dumps(result, ensure_ascii=False)
     limit = _tool_result_char_limit()
     if len(content) <= limit:
@@ -92,7 +94,7 @@ def _strip_code_fences(text: str) -> str:
     return value
 
 
-def _safe_parse_json_object(text: str) -> Optional[Dict[str, Any]]:
+def _safe_parse_json_object(text: str) -> dict[str, Any] | None:
     cleaned = _strip_code_fences(text)
     if not cleaned:
         return None
@@ -117,7 +119,7 @@ def _safe_parse_json_object(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _extract_wrapped_reply_payload(value: Any) -> Optional[Dict[str, Any]]:
+def _extract_wrapped_reply_payload(value: Any) -> dict[str, Any] | None:
     text = _trim_text(value, _reply_char_limit())
     if not text:
         return None
@@ -148,12 +150,12 @@ def _normalize_reply_text(value: Any, max_len: int = 12000) -> str:
     return _strip_leaked_response_fields(text)
 
 
-def _extract_responses_text(data: Dict[str, Any]) -> str:
+def _extract_responses_text(data: dict[str, Any]) -> str:
     output_text = data.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
         return output_text.strip()
 
-    parts: List[str] = []
+    parts: list[str] = []
     output = data.get("output")
     if isinstance(output, list):
         for item in output:
@@ -175,7 +177,7 @@ def _extract_responses_text(data: Dict[str, Any]) -> str:
     return "\n".join(parts).strip()
 
 
-def _normalize_text_list(value: Any, max_items: int = 4, max_len: int = 140) -> List[str]:
+def _normalize_text_list(value: Any, max_items: int = 4, max_len: int = 140) -> list[str]:
     if isinstance(value, str):
         candidates = [line.strip("-• \t") for line in value.splitlines() if line.strip()]
     elif isinstance(value, list):
@@ -183,7 +185,7 @@ def _normalize_text_list(value: Any, max_items: int = 4, max_len: int = 140) -> 
     else:
         candidates = []
 
-    out: List[str] = []
+    out: list[str] = []
     seen: set[str] = set()
     for item in candidates:
         _append_unique_text(out, seen, item, max_len)
@@ -192,7 +194,7 @@ def _normalize_text_list(value: Any, max_items: int = 4, max_len: int = 140) -> 
     return out
 
 
-def _append_unique_text(out: List[str], seen: set[str], value: Any, max_len: int) -> bool:
+def _append_unique_text(out: list[str], seen: set[str], value: Any, max_len: int) -> bool:
     text = _trim_text(value, max_len=max_len).strip()
     normalized = text.lower()
     if not text or normalized in seen:
@@ -203,7 +205,7 @@ def _append_unique_text(out: List[str], seen: set[str], value: Any, max_len: int
     return True
 
 
-def _coerce_finite_float(value: Any) -> Optional[float]:
+def _coerce_finite_float(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -213,7 +215,7 @@ def _coerce_finite_float(value: Any) -> Optional[float]:
     return parsed if math.isfinite(parsed) else None
 
 
-def _coerce_bounded_float(value: Any, minimum: float, maximum: float) -> Optional[float]:
+def _coerce_bounded_float(value: Any, minimum: float, maximum: float) -> float | None:
     parsed = _coerce_finite_float(value)
     if parsed is None or parsed < minimum or parsed > maximum:
         return None
@@ -227,11 +229,11 @@ def _coerce_bounded_int(value: Any, default: int, minimum: int, maximum: int) ->
     return max(minimum, min(int(parsed), maximum))
 
 
-def _normalize_area_risk_coordinates(value: Any) -> List[Dict[str, float]]:
+def _normalize_area_risk_coordinates(value: Any) -> list[dict[str, float]]:
     if not isinstance(value, list):
         return []
 
-    coordinates: List[Dict[str, float]] = []
+    coordinates: list[dict[str, float]] = []
     for item in value:
         if not isinstance(item, dict):
             continue
@@ -243,7 +245,7 @@ def _normalize_area_risk_coordinates(value: Any) -> List[Dict[str, float]]:
     return coordinates
 
 
-def _normalize_module_key(value: Any) -> Optional[str]:
+def _normalize_module_key(value: Any) -> str | None:
     text = str(value or "").strip().lower()
     if not text:
         return None
@@ -280,7 +282,7 @@ _ACTION_WRITE_KEYWORD_PATTERN = re.compile(
 def _mask_action_aql_non_executable(query: str) -> str:
     chars = list(query or "")
     index = 0
-    quote: Optional[str] = None
+    quote: str | None = None
     while index < len(chars):
         char = chars[index]
         next_char = chars[index + 1] if index + 1 < len(chars) else ""
@@ -322,7 +324,7 @@ def _looks_like_read_only_aql(value: str) -> bool:
     return bool(text) and not _ACTION_WRITE_KEYWORD_PATTERN.search(_mask_action_aql_non_executable(text))
 
 
-def _default_action_label(action_type: str, country_name: Optional[str], module_keys: List[str]) -> str:
+def _default_action_label(action_type: str, country_name: str | None, module_keys: list[str]) -> str:
     if action_type == "focus_country" and country_name:
         return f"Focus {country_name}"
     if action_type == "clear_country_focus":
@@ -342,7 +344,7 @@ def _default_action_label(action_type: str, country_name: Optional[str], module_
     return "Run action"
 
 
-def _normalize_action(action: Any) -> Optional[Dict[str, Any]]:
+def _normalize_action(action: Any) -> dict[str, Any] | None:
     if not isinstance(action, dict):
         return None
 
@@ -385,7 +387,7 @@ def _normalize_action(action: Any) -> Optional[Dict[str, Any]]:
     reason = _trim_text(action.get("reason"), 180) or None
     label = _trim_text(action.get("label"), 80) or _default_action_label(action_type, country_name, module_keys)
 
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "type": action_type,
         "label": label,
     }
@@ -433,14 +435,14 @@ def _normalize_action(action: Any) -> Optional[Dict[str, Any]]:
 
 
 def build_prompt_messages(
-    session_id: Optional[str],
+    session_id: str | None,
     allow_ui_actions: bool,
-    conversation_history: List[Dict[str, str]],
+    conversation_history: list[dict[str, str]],
     query_preview: str,
-    summary: Dict[str, Any],
-    context: Dict[str, Any],
+    summary: dict[str, Any],
+    context: dict[str, Any],
     user_message: str,
-) -> List[Dict[str, str]]:
+) -> list[dict[str, str]]:
     system_prompt = (
         "You are Lunar Explorer Agent inside LunarChain Explorer. "
         "Start as a normal intelligence chat; do not claim you loaded or inspected the current Explorer scope unless you actually used a scope tool. "
@@ -597,7 +599,7 @@ def build_prompt_messages(
     ]
 
 
-def normalize_response_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_response_payload(payload: dict[str, Any]) -> dict[str, Any]:
     wrapped_reply_payload = _extract_wrapped_reply_payload(payload.get("reply"))
     reply = _normalize_reply_text(payload.get("reply"), _reply_char_limit())
     actions = []
@@ -624,7 +626,7 @@ def normalize_response_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def normalize_model_response(raw_text: str) -> Dict[str, Any]:
+def normalize_model_response(raw_text: str) -> dict[str, Any]:
     parsed = _safe_parse_json_object(raw_text)
     if not isinstance(parsed, dict):
         return {
@@ -635,8 +637,8 @@ def normalize_model_response(raw_text: str) -> Dict[str, Any]:
     return normalize_response_payload(parsed)
 
 
-def _tool_result_payloads(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    payloads: List[Dict[str, Any]] = []
+def _tool_result_payloads(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
     for message in messages:
         if not isinstance(message, dict) or message.get("role") != "tool":
             continue
@@ -652,10 +654,10 @@ def _tool_result_payloads(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return payloads
 
 
-def _report_name_list(reports: Any, limit: int = 5) -> List[str]:
+def _report_name_list(reports: Any, limit: int = 5) -> list[str]:
     if not isinstance(reports, list):
         return []
-    names: List[str] = []
+    names: list[str] = []
     for report in reports:
         if not isinstance(report, dict):
             continue
@@ -667,7 +669,7 @@ def _report_name_list(reports: Any, limit: int = 5) -> List[str]:
     return names
 
 
-def _latest_user_request_text(messages: List[Dict[str, Any]]) -> str:
+def _latest_user_request_text(messages: list[dict[str, Any]]) -> str:
     for message in reversed(messages):
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
@@ -716,8 +718,8 @@ def _saved_query_name_from_request(request: str, query_preview: str) -> str:
     return _trim_text(query_preview or "Agent generated query", 110)
 
 
-def _payload_report_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+def _payload_report_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for key in ("reports", "matches"):
         value = payload.get(key)
         if isinstance(value, list):
@@ -728,13 +730,13 @@ def _payload_report_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
-def _facet_names(facets: Any, key: str, limit: int = 8) -> List[str]:
+def _facet_names(facets: Any, key: str, limit: int = 8) -> list[str]:
     if not isinstance(facets, dict):
         return []
     raw_items = facets.get(key)
     if not isinstance(raw_items, list):
         return []
-    names: List[str] = []
+    names: list[str] = []
     seen: set[str] = set()
     for item in raw_items:
         if isinstance(item, dict):
@@ -747,13 +749,13 @@ def _facet_names(facets: Any, key: str, limit: int = 8) -> List[str]:
     return names
 
 
-def _summary_location_names(summary: Any, limit: int = 6) -> List[str]:
+def _summary_location_names(summary: Any, limit: int = 6) -> list[str]:
     if not isinstance(summary, dict):
         return []
     locations = summary.get("topLocations")
     if not isinstance(locations, list):
         return []
-    names: List[str] = []
+    names: list[str] = []
     seen: set[str] = set()
     for item in locations:
         if not isinstance(item, dict):
@@ -764,8 +766,8 @@ def _summary_location_names(summary: Any, limit: int = 6) -> List[str]:
     return names
 
 
-def _report_entity_names(reports: List[Dict[str, Any]], limit: int = 12) -> List[str]:
-    names: List[str] = []
+def _report_entity_names(reports: list[dict[str, Any]], limit: int = 12) -> list[str]:
+    names: list[str] = []
     seen: set[str] = set()
     for report in reports:
         entities = report.get("entities")
@@ -782,12 +784,12 @@ def _report_entity_names(reports: List[Dict[str, Any]], limit: int = 12) -> List
     return names
 
 
-def _tool_payloads_have_intelligence_evidence(messages: List[Dict[str, Any]]) -> bool:
+def _tool_payloads_have_intelligence_evidence(messages: list[dict[str, Any]]) -> bool:
     return _tool_payloads_have_graph_evidence(messages) or _tool_payloads_have_public_web_evidence(messages)
 
 
-def _conversation_search_text(messages: List[Dict[str, Any]], max_len: int = 900) -> str:
-    parts: List[str] = []
+def _conversation_search_text(messages: list[dict[str, Any]], max_len: int = 900) -> str:
+    parts: list[str] = []
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -810,15 +812,15 @@ def _conversation_search_text(messages: List[Dict[str, Any]], max_len: int = 900
     return _trim_text(" | ".join(parts[-8:]), max_len)
 
 
-def _infer_rescue_graph_search_arguments(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _infer_rescue_graph_search_arguments(messages: list[dict[str, Any]]) -> dict[str, Any]:
     search_text = _conversation_search_text(messages)
     latest = _latest_user_request_text(messages)
     combined = _trim_text(f"{latest} | Context: {search_text}", 900)
-    location_terms: List[str] = []
+    location_terms: list[str] = []
     if re.search(r"\b(?:south africa|sa|za)\b", combined, flags=re.IGNORECASE):
         location_terms = ["South Africa", "ZA"]
 
-    terms: List[str] = []
+    terms: list[str] = []
     stopwords = {
         "about", "after", "agent", "around", "before", "context", "current", "events", "graph", "hello",
         "intelligence", "latest", "please", "report", "reports", "scope", "that", "the", "this", "what",
@@ -846,8 +848,8 @@ def _infer_rescue_graph_search_arguments(messages: List[Dict[str, Any]]) -> Dict
 
 
 async def _synthesize_with_rescue_tool_evidence(
-    working_messages: List[Dict[str, Any]],
-    session_id: Optional[str],
+    working_messages: list[dict[str, Any]],
+    session_id: str | None,
 ) -> str:
     if not _tool_payloads_have_intelligence_evidence(working_messages):
         try:
@@ -866,7 +868,7 @@ async def _synthesize_with_rescue_tool_evidence(
     return _synthesize_tool_backed_response(working_messages)
 
 
-def _tool_payloads_have_graph_evidence(messages: List[Dict[str, Any]]) -> bool:
+def _tool_payloads_have_graph_evidence(messages: list[dict[str, Any]]) -> bool:
     for payload in _tool_result_payloads(messages):
         if payload.get("explorerScope") or payload.get("reports") or payload.get("matches") or payload.get("report"):
             return True
@@ -875,7 +877,7 @@ def _tool_payloads_have_graph_evidence(messages: List[Dict[str, Any]]) -> bool:
     return False
 
 
-def _tool_payloads_have_public_web_evidence(messages: List[Dict[str, Any]]) -> bool:
+def _tool_payloads_have_public_web_evidence(messages: list[dict[str, Any]]) -> bool:
     for payload in _tool_result_payloads(messages):
         if payload.get("tool") != "search_public_web":
             continue
@@ -884,7 +886,7 @@ def _tool_payloads_have_public_web_evidence(messages: List[Dict[str, Any]]) -> b
     return False
 
 
-def _tool_was_called(messages: List[Dict[str, Any]], tool_name: str) -> bool:
+def _tool_was_called(messages: list[dict[str, Any]], tool_name: str) -> bool:
     expected = str(tool_name or "").strip()
     if not expected:
         return False
@@ -918,7 +920,7 @@ def _request_mentions_current_scope(text: str) -> bool:
     ))
 
 
-def _request_wants_public_web_context(messages: List[Dict[str, Any]]) -> bool:
+def _request_wants_public_web_context(messages: list[dict[str, Any]]) -> bool:
     text = _conversation_search_text(messages, max_len=1400)
     latest = _latest_user_request_text(messages)
     combined = f"{latest} | {text}".lower()
@@ -936,7 +938,7 @@ def _request_wants_public_web_context(messages: List[Dict[str, Any]]) -> bool:
     )
 
 
-def _request_wants_graph_wide_context(messages: List[Dict[str, Any]]) -> bool:
+def _request_wants_graph_wide_context(messages: list[dict[str, Any]]) -> bool:
     text = _conversation_search_text(messages, max_len=1400)
     latest = _latest_user_request_text(messages)
     latest_lower = latest.lower()
@@ -964,8 +966,8 @@ def _request_wants_graph_wide_context(messages: List[Dict[str, Any]]) -> bool:
     )
 
 
-def _report_content_lines(reports: List[Dict[str, Any]], limit: int = 4) -> List[str]:
-    lines: List[str] = []
+def _report_content_lines(reports: list[dict[str, Any]], limit: int = 4) -> list[str]:
+    lines: list[str] = []
     for report in reports[:limit]:
         if not isinstance(report, dict):
             continue
@@ -996,15 +998,15 @@ def _report_content_lines(reports: List[Dict[str, Any]], limit: int = 4) -> List
     return lines
 
 
-def _synthesize_public_web_lines(payload: Dict[str, Any]) -> List[str]:
+def _synthesize_public_web_lines(payload: dict[str, Any]) -> list[str]:
     summary = _trim_text(payload.get("summary") or payload.get("answer"), 1600)
-    lines: List[str] = []
+    lines: list[str] = []
     if summary:
         lines.append(summary)
 
     findings = payload.get("findings")
     if isinstance(findings, list) and findings:
-        finding_lines: List[str] = []
+        finding_lines: list[str] = []
         for item in findings[:5]:
             if not isinstance(item, dict):
                 continue
@@ -1025,7 +1027,7 @@ def _synthesize_public_web_lines(payload: Dict[str, Any]) -> List[str]:
     return lines
 
 
-def _synthesize_tool_backed_response(messages: List[Dict[str, Any]]) -> str:
+def _synthesize_tool_backed_response(messages: list[dict[str, Any]]) -> str:
     """Last-resort JSON response when the model used tools but returned no text."""
     payloads = _tool_result_payloads(messages)
     latest_request = _latest_user_request_text(messages)
@@ -1105,7 +1107,7 @@ def _synthesize_tool_backed_response(messages: List[Dict[str, Any]]) -> str:
                 if web_lines:
                     lines.append("Public web context:\n" + "\n\n".join(web_lines))
 
-            actions: List[Dict[str, Any]] = []
+            actions: list[dict[str, Any]] = []
             if explorer_scope and explorer_scope.get("compiledAql"):
                 scope_preview = explorer_scope.get("queryPreview") or "Graph investigation"
                 if _request_wants_saved_query(latest_request):
@@ -1160,7 +1162,7 @@ def _extract_text_from_content(content: Any) -> str:
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):
-        parts: List[str] = []
+        parts: list[str] = []
         for item in content:
             if isinstance(item, str):
                 value = item.strip()
@@ -1190,7 +1192,7 @@ def _extract_text_from_content(content: Any) -> str:
     return ""
 
 
-def _extract_text_from_chat_response(data: Dict[str, Any]) -> str:
+def _extract_text_from_chat_response(data: dict[str, Any]) -> str:
     choices = data.get("choices")
     if isinstance(choices, list) and choices:
         first_choice = choices[0] if isinstance(choices[0], dict) else {}
@@ -1218,7 +1220,7 @@ def _uses_reasoning_effort(model: str) -> bool:
     return normalized.startswith("gpt-5")
 
 
-def _chat_reasoning_effort(model: str) -> Optional[str]:
+def _chat_reasoning_effort(model: str) -> str | None:
     if not _uses_reasoning_effort(model):
         return None
     effort = str(settings.chat_reasoning_effort or "low").strip().lower()
@@ -1227,7 +1229,7 @@ def _chat_reasoning_effort(model: str) -> Optional[str]:
     return "low"
 
 
-def _openai_json_headers() -> Dict[str, str]:
+def _openai_json_headers() -> dict[str, str]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
     return {
@@ -1239,14 +1241,14 @@ def _openai_json_headers() -> Dict[str, str]:
 def _responses_payload(
     prompt: str,
     *,
-    model: Optional[str] = None,
-    max_output_tokens: Optional[int] = None,
-    reasoning_effort: Optional[str] = None,
-) -> Dict[str, Any]:
+    model: str | None = None,
+    max_output_tokens: int | None = None,
+    reasoning_effort: str | None = None,
+) -> dict[str, Any]:
     model_name = model or settings.area_risk_model or settings.model
     token_limit = max_output_tokens if max_output_tokens is not None else int(settings.area_risk_max_output_tokens or 700)
     token_cap = 2000 if max_output_tokens is not None else 1400
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "model": model_name,
         "input": prompt,
         "max_output_tokens": max(200, min(int(token_limit or 700), token_cap)),
@@ -1261,8 +1263,8 @@ def _responses_payload(
 async def _post_responses_request(
     client: httpx.AsyncClient,
     *,
-    headers: Dict[str, str],
-    payload: Dict[str, Any],
+    headers: dict[str, str],
+    payload: dict[str, Any],
 ) -> httpx.Response:
     response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
     if response.status_code == 400 and "reasoning" in payload and "reasoning" in (response.text or "").lower():
@@ -1278,9 +1280,9 @@ def _bounded_area_risk_max_zones(max_zones: int) -> int:
     return min(requested, configured)
 
 
-def _bounded_area_risk_evidence(evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _bounded_area_risk_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
     max_items = max(1, min(int(settings.area_risk_max_evidence_items or 12), 40))
-    bounded: List[Dict[str, Any]] = []
+    bounded: list[dict[str, Any]] = []
     for item in evidence[:max_items]:
         if not isinstance(item, dict):
             continue
@@ -1345,7 +1347,7 @@ AREA_RISK_LABEL_STOPWORDS = {
 }
 
 
-def _area_risk_context_labels(aoi: Dict[str, Any]) -> set[str]:
+def _area_risk_context_labels(aoi: dict[str, Any]) -> set[str]:
     labels: set[str] = set()
     label_context = aoi.get("labelContext") if isinstance(aoi.get("labelContext"), dict) else {}
     for value in [
@@ -1370,19 +1372,19 @@ def _area_risk_text_has_term(text: str) -> bool:
     return any(term in normalized for term in AREA_RISK_EVIDENCE_TERMS)
 
 
-def _area_risk_terms_in_text(text: str, limit: int = 5) -> List[str]:
+def _area_risk_terms_in_text(text: str, limit: int = 5) -> list[str]:
     normalized = str(text or "").casefold()
     terms = [term for term in sorted(AREA_RISK_EVIDENCE_TERMS) if term in normalized]
     return terms[:limit]
 
 
-def _split_area_risk_label_candidate(value: str) -> List[str]:
+def _split_area_risk_label_candidate(value: str) -> list[str]:
     parts = re.split(r"\s*(?:,|;|/|\band\b|\bor\b|&)\s*", value)
     return [part.strip(" .:-()[]{}") for part in parts if part.strip(" .:-()[]{}")]
 
 
-def _area_risk_label_candidates_from_text(text: str) -> List[str]:
-    candidates: List[str] = []
+def _area_risk_label_candidates_from_text(text: str) -> list[str]:
+    candidates: list[str] = []
     preposition_pattern = re.compile(
         r"\b(?:in|near|around|at|from|across|through|within|outside)\s+"
         r"([A-Z][A-Za-z0-9'’.-]*(?:\s+(?:of|the|de|del|la|le|du|da|do|dos|das|van|von|[A-Z][A-Za-z0-9'’.-]*)){0,4})"
@@ -1398,7 +1400,7 @@ def _area_risk_label_candidates_from_text(text: str) -> List[str]:
     return candidates
 
 
-def _clean_area_risk_label_candidate(label: str, context_labels: set[str]) -> Optional[str]:
+def _clean_area_risk_label_candidate(label: str, context_labels: set[str]) -> str | None:
     cleaned = " ".join(str(label or "").replace("’", "'").split()).strip(" .:-()[]{}")
     if not cleaned or len(cleaned) < 3 or len(cleaned) > 80:
         return None
@@ -1419,15 +1421,15 @@ def _clean_area_risk_label_candidate(label: str, context_labels: set[str]) -> Op
 
 def fallback_safe_route_area_risk_candidates(
     *,
-    aoi: Dict[str, Any],
-    evidence: List[Dict[str, Any]],
+    aoi: dict[str, Any],
+    evidence: list[dict[str, Any]],
     max_zones: int,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Token-free fallback that extracts named, source-backed localities from bounded evidence."""
 
     bounded_evidence = _bounded_area_risk_evidence(evidence)
     context_labels = _area_risk_context_labels(aoi)
-    candidates: Dict[str, Dict[str, Any]] = {}
+    candidates: dict[str, dict[str, Any]] = {}
 
     for item in bounded_evidence:
         url = _trim_text(item.get("url"), 400)
@@ -1463,7 +1465,7 @@ def fallback_safe_route_area_risk_candidates(
         key=lambda item: (len(item["evidence_urls"]), item["mentions"], len(item["risk_terms"]), len(item["label"])),
         reverse=True,
     )
-    zones: List[Dict[str, Any]] = []
+    zones: list[dict[str, Any]] = []
     for item in ranked[: _bounded_area_risk_max_zones(max_zones)]:
         terms = sorted(item["risk_terms"])[:5]
         score = min(84, 48 + len(item["evidence_urls"]) * 8 + min(item["mentions"], 4) * 4 + len(terms) * 2)
@@ -1487,9 +1489,9 @@ def fallback_safe_route_area_risk_candidates(
 def build_public_web_search_prompt(
     *,
     query: str,
-    focus: Optional[str] = None,
-    region: Optional[str] = None,
-    recency_days: Optional[int] = None,
+    focus: str | None = None,
+    region: str | None = None,
+    recency_days: int | None = None,
     max_sources: int = 6,
 ) -> str:
     bounded_sources = max(2, min(int(max_sources or 6), 10))
@@ -1544,8 +1546,8 @@ def build_public_web_search_prompt(
     )
 
 
-def normalize_public_web_search_payload(payload: Dict[str, Any], *, query: str) -> Dict[str, Any]:
-    findings: List[Dict[str, str]] = []
+def normalize_public_web_search_payload(payload: dict[str, Any], *, query: str) -> dict[str, Any]:
+    findings: list[dict[str, str]] = []
     raw_findings = payload.get("findings") if isinstance(payload, dict) else []
     if not isinstance(raw_findings, list):
         raw_findings = []
@@ -1565,7 +1567,7 @@ def normalize_public_web_search_payload(payload: Dict[str, Any], *, query: str) 
         if len(findings) >= 8:
             break
 
-    sources: List[Dict[str, str]] = []
+    sources: list[dict[str, str]] = []
     raw_sources = payload.get("sources") if isinstance(payload, dict) else []
     if not isinstance(raw_sources, list):
         raw_sources = []
@@ -1602,7 +1604,7 @@ def normalize_public_web_search_payload(payload: Dict[str, Any], *, query: str) 
     }
 
 
-def _tool_specs() -> List[Dict[str, Any]]:
+def _tool_specs() -> list[dict[str, Any]]:
     return [
         {
             "type": "function",
@@ -1747,7 +1749,7 @@ def _tool_specs() -> List[Dict[str, Any]]:
     ]
 
 
-def _backend_headers() -> Dict[str, str]:
+def _backend_headers() -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     token = str(settings.backend_shared_token or "").strip()
     if token:
@@ -1755,7 +1757,7 @@ def _backend_headers() -> Dict[str, str]:
     return headers
 
 
-async def _call_backend_tool(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+async def _call_backend_tool(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     base_url = str(settings.backend_base_url or "").strip()
     if not base_url:
         raise RuntimeError("LUNAR_AGENT_BACKEND_BASE_URL is not configured")
@@ -1770,7 +1772,7 @@ async def _call_backend_tool(path: str, payload: Dict[str, Any]) -> Dict[str, An
     return response.json() if response.content else {}
 
 
-async def _execute_tool_call(name: str, arguments: Dict[str, Any], session_id: Optional[str]) -> Dict[str, Any]:
+async def _execute_tool_call(name: str, arguments: dict[str, Any], session_id: str | None) -> dict[str, Any]:
     if name == "search_public_web":
         query = _trim_text(arguments.get("query"), 500)
         if not query:
@@ -1854,7 +1856,7 @@ async def _execute_tool_call(name: str, arguments: Dict[str, Any], session_id: O
         )
 
     if name == "search_intelligence_graph":
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "session_id": scoped_session_id,
             "query": _trim_text(arguments.get("query"), 500),
             "limit": max(1, min(int(arguments.get("limit") or 12), 30)),
@@ -1895,11 +1897,11 @@ async def _execute_tool_call(name: str, arguments: Dict[str, Any], session_id: O
 
 
 async def _chat_completion_request(
-    messages: List[Dict[str, Any]],
-    tools: Optional[List[Dict[str, Any]]] = None,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
     *,
-    model: Optional[str] = None,
-) -> Dict[str, Any]:
+    model: str | None = None,
+) -> dict[str, Any]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
 
@@ -1909,7 +1911,7 @@ async def _chat_completion_request(
         "Authorization": f"Bearer {settings.openai_api_key}",
         "Content-Type": "application/json",
     }
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "model": model_name,
         "messages": messages,
     }
@@ -1927,7 +1929,7 @@ async def _chat_completion_request(
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
 
-    response: Optional[httpx.Response] = None
+    response: httpx.Response | None = None
     async with httpx.AsyncClient(timeout=timeout) as client:
         request_payload = dict(payload)
         for _ in range(3):
@@ -1957,7 +1959,7 @@ async def _chat_completion_request(
     return response.json()
 
 
-async def run_openai_analysis(messages: List[Dict[str, Any]], *, model: Optional[str] = None) -> str:
+async def run_openai_analysis(messages: list[dict[str, Any]], *, model: str | None = None) -> str:
     data = await _chat_completion_request(messages, model=model)
     parsed_text = _extract_text_from_chat_response(data)
     if parsed_text:
@@ -1968,10 +1970,10 @@ async def run_openai_analysis(messages: List[Dict[str, Any]], *, model: Optional
 async def run_openai_web_research(
     prompt: str,
     *,
-    model: Optional[str] = None,
-    context_size: Optional[str] = None,
-    max_output_tokens: Optional[int] = None,
-    reasoning_effort: Optional[str] = None,
+    model: str | None = None,
+    context_size: str | None = None,
+    max_output_tokens: int | None = None,
+    reasoning_effort: str | None = None,
 ) -> str:
     timeout = max(20, int(settings.http_timeout))
     headers = _openai_json_headers()
@@ -1985,7 +1987,7 @@ async def run_openai_web_research(
         max_output_tokens=max_output_tokens,
         reasoning_effort=reasoning_effort,
     )
-    tool_variants: List[List[Dict[str, Any]]] = [
+    tool_variants: list[list[dict[str, Any]]] = [
         [{"type": "web_search", "search_context_size": resolved_context_size}],
         [{"type": "web_search_preview", "search_context_size": resolved_context_size}],
     ]
@@ -2013,7 +2015,7 @@ async def run_openai_web_research(
     raise RuntimeError(last_error or "Responses API web research failed")
 
 
-async def run_openai_responses_analysis(prompt: str, *, model: Optional[str] = None) -> str:
+async def run_openai_responses_analysis(prompt: str, *, model: str | None = None) -> str:
     timeout = max(20, int(settings.http_timeout))
     headers = _openai_json_headers()
     payload = _responses_payload(prompt, model=model)
@@ -2030,11 +2032,11 @@ async def run_openai_responses_analysis(prompt: str, *, model: Optional[str] = N
     raise RuntimeError("Responses API returned no text")
 
 
-async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Optional[str]) -> str:
+async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: str | None) -> str:
     if not str(settings.backend_base_url or "").strip() or not str(session_id or "").strip():
         return await run_openai_analysis(messages)
 
-    working_messages: List[Dict[str, Any]] = list(messages)
+    working_messages: list[dict[str, Any]] = list(messages)
     tools = _tool_specs()
     saw_tool_result = False
     wants_public_web_context = _request_wants_public_web_context(working_messages)
@@ -2065,7 +2067,7 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
                 })
                 continue
             bounded_tool_calls = tool_calls[:remaining_tool_calls]
-            assistant_message: Dict[str, Any] = {
+            assistant_message: dict[str, Any] = {
                 "role": "assistant",
                 "content": content_text or "",
                 "tool_calls": bounded_tool_calls,
@@ -2146,9 +2148,9 @@ async def run_tool_aware_analysis(messages: List[Dict[str, Any]], session_id: Op
 
 def build_safe_route_area_risk_evidence_prompt(
     *,
-    session_id: Optional[str],
-    aoi: Dict[str, Any],
-    evidence: List[Dict[str, Any]],
+    session_id: str | None,
+    aoi: dict[str, Any],
+    evidence: list[dict[str, Any]],
     max_zones: int,
 ) -> str:
     bounded_max_zones = _bounded_area_risk_max_zones(max_zones)
@@ -2205,9 +2207,9 @@ def build_safe_route_area_risk_evidence_prompt(
 
 def build_safe_route_area_risk_web_prompt(
     *,
-    session_id: Optional[str],
-    aoi: Dict[str, Any],
-    evidence: List[Dict[str, Any]],
+    session_id: str | None,
+    aoi: dict[str, Any],
+    evidence: list[dict[str, Any]],
     max_zones: int,
 ) -> str:
     bounded_max_zones = _bounded_area_risk_max_zones(max_zones)
@@ -2270,8 +2272,8 @@ def build_safe_route_area_risk_web_prompt(
     )
 
 
-def normalize_safe_route_area_risk_payload(payload: Dict[str, Any], max_zones: int) -> Dict[str, Any]:
-    zones: List[Dict[str, Any]] = []
+def normalize_safe_route_area_risk_payload(payload: dict[str, Any], max_zones: int) -> dict[str, Any]:
+    zones: list[dict[str, Any]] = []
     raw_zones = payload.get("zones") if isinstance(payload, dict) else []
     if not isinstance(raw_zones, list):
         raw_zones = []
@@ -2321,11 +2323,11 @@ def normalize_safe_route_area_risk_payload(payload: Dict[str, Any], max_zones: i
 
 async def research_safe_route_area_risk(
     *,
-    session_id: Optional[str],
-    aoi: Dict[str, Any],
-    evidence: List[Dict[str, Any]],
+    session_id: str | None,
+    aoi: dict[str, Any],
+    evidence: list[dict[str, Any]],
     max_zones: int = 8,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     bounded_max_zones = _bounded_area_risk_max_zones(max_zones)
     if settings.area_risk_web_research_enabled:
         web_prompt = build_safe_route_area_risk_web_prompt(
@@ -2395,14 +2397,14 @@ async def research_safe_route_area_risk(
 
 
 async def respond(
-    session_id: Optional[str],
+    session_id: str | None,
     allow_ui_actions: bool,
-    conversation_history: List[Dict[str, str]],
+    conversation_history: list[dict[str, str]],
     query_preview: str,
-    summary: Dict[str, Any],
-    context: Dict[str, Any],
+    summary: dict[str, Any],
+    context: dict[str, Any],
     user_message: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     messages = build_prompt_messages(
         session_id=session_id,
         allow_ui_actions=allow_ui_actions,
