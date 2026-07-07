@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import re
+import ipaddress
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -17,6 +18,8 @@ logger = logging.getLogger(__name__)
 EXPLORER_AGENT_REPLY_MAX_CHARS = 4800
 EXPLORER_AGENT_MAX_COMPLETION_TOKEN_CAP = 2000
 EXPLORER_AGENT_MAX_LEGACY_TOKEN_CAP = 1400
+GRAPH_SCOPE_ACTION_TYPES = {"apply_graph_query_scope", "save_and_apply_graph_query_scope"}
+VERIFIED_SCOPE_ACTION_KEY = "_lunarAgentVerifiedScopeAction"
 
 
 def _trim_text(value: Any, max_len: int = 240) -> str:
@@ -34,13 +37,16 @@ def _safe_http_url(value: Any, max_len: int = 500) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or "@" in parsed.netloc:
         return ""
     host = (parsed.hostname or "").strip().lower()
-    if (
-        not host
-        or host == "localhost"
-        or host.endswith(".local")
-        or host.startswith(("127.", "10.", "192.168."))
-        or re.match(r"^172\.(1[6-9]|2\d|3[0-1])\.", host)
-    ):
+    if not host or host == "localhost" or host.endswith((".localhost", ".local")):
+        return ""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if not ip.is_global:
+            return ""
+    elif host.isdigit() or "." not in host:
         return ""
     return text
 
@@ -431,6 +437,8 @@ def _normalize_action(action: Any) -> dict[str, Any] | None:
             payload["dynamicEndDate"] = action.get("dynamicEndDate")
         elif isinstance(action.get("dynamic_end_date"), bool):
             payload["dynamicEndDate"] = action.get("dynamic_end_date")
+    if action.get(VERIFIED_SCOPE_ACTION_KEY) is True:
+        payload[VERIFIED_SCOPE_ACTION_KEY] = True
     return payload
 
 
@@ -637,6 +645,72 @@ def normalize_model_response(raw_text: str) -> dict[str, Any]:
     return normalize_response_payload(parsed)
 
 
+def _normalize_aql_for_compare(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def _graph_scope_aqls_from_tool_messages(messages: list[dict[str, Any]]) -> set[str]:
+    scope_aqls: set[str] = set()
+    for payload in _tool_result_payloads(messages):
+        explorer_scope = payload.get("explorerScope")
+        if not isinstance(explorer_scope, dict):
+            continue
+        compiled_aql = _normalize_aql_for_compare(explorer_scope.get("compiledAql"))
+        if compiled_aql and _looks_like_read_only_aql(compiled_aql):
+            scope_aqls.add(compiled_aql)
+    return scope_aqls
+
+
+def _with_verified_scope_marker(action: dict[str, Any]) -> dict[str, Any]:
+    marked = dict(action)
+    marked[VERIFIED_SCOPE_ACTION_KEY] = True
+    return marked
+
+
+def _sanitize_scope_actions_for_tool_evidence(raw_text: str, messages: list[dict[str, Any]]) -> str:
+    parsed = _safe_parse_json_object(raw_text)
+    if not isinstance(parsed, dict):
+        return raw_text
+    raw_actions = parsed.get("actions")
+    if not isinstance(raw_actions, list):
+        return raw_text
+
+    verified_aqls = _graph_scope_aqls_from_tool_messages(messages)
+    changed = False
+    sanitized_actions: list[Any] = []
+    for action in raw_actions:
+        if not isinstance(action, dict):
+            sanitized_actions.append(action)
+            continue
+        action_type = str(action.get("type") or "").strip().lower()
+        if action_type not in GRAPH_SCOPE_ACTION_TYPES:
+            sanitized_actions.append(action)
+            continue
+        compiled_aql = _normalize_aql_for_compare(
+            action.get("compiledAql")
+            or action.get("compiled_aql")
+            or action.get("query")
+        )
+        if compiled_aql and compiled_aql in verified_aqls:
+            sanitized_actions.append(_with_verified_scope_marker(action))
+            changed = True
+        else:
+            changed = True
+
+    if not changed:
+        return raw_text
+
+    next_payload = dict(parsed)
+    next_payload["actions"] = sanitized_actions
+    return json.dumps(next_payload, ensure_ascii=False)
+
+
+def _strip_internal_action_fields(action: dict[str, Any]) -> dict[str, Any]:
+    public_action = dict(action)
+    public_action.pop(VERIFIED_SCOPE_ACTION_KEY, None)
+    return public_action
+
+
 def _filter_response_actions_for_ui_policy(
     actions: Any,
     *,
@@ -644,17 +718,25 @@ def _filter_response_actions_for_ui_policy(
     user_message: str,
 ) -> list[dict[str, Any]]:
     normalized_actions = [action for action in (actions or []) if isinstance(action, dict)]
+    public_actions: list[dict[str, Any]] = []
     if allow_ui_actions:
-        return normalized_actions[:3]
+        for action in normalized_actions:
+            action_type = str(action.get("type") or "").strip().lower()
+            if action_type in GRAPH_SCOPE_ACTION_TYPES and action.get(VERIFIED_SCOPE_ACTION_KEY) is not True:
+                continue
+            public_actions.append(_strip_internal_action_fields(action))
+            if len(public_actions) >= 3:
+                break
+        return public_actions
 
     if _request_wants_saved_query(user_message):
         for action in normalized_actions:
-            if action.get("type") == "save_and_apply_graph_query_scope":
-                return [action]
+            if action.get("type") == "save_and_apply_graph_query_scope" and action.get(VERIFIED_SCOPE_ACTION_KEY) is True:
+                return [_strip_internal_action_fields(action)]
 
     for action in normalized_actions:
-        if action.get("type") == "apply_graph_query_scope":
-            return [action]
+        if action.get("type") == "apply_graph_query_scope" and action.get(VERIFIED_SCOPE_ACTION_KEY) is True:
+            return [_strip_internal_action_fields(action)]
 
     return []
 
@@ -887,7 +969,10 @@ async def _synthesize_with_rescue_tool_evidence(
             })
         except Exception:
             pass
-    return _synthesize_tool_backed_response(working_messages)
+    return _sanitize_scope_actions_for_tool_evidence(
+        _synthesize_tool_backed_response(working_messages),
+        working_messages,
+    )
 
 
 def _tool_payloads_have_graph_evidence(messages: list[dict[str, Any]]) -> bool:
@@ -905,14 +990,17 @@ def _public_web_payload_has_evidence(payload: dict[str, Any]) -> bool:
     status = str(payload.get("status") or "success").strip().lower()
     if status not in {"success", "ok", "completed"}:
         return False
-    summary = _trim_text(payload.get("summary") or payload.get("answer"), 1200)
     findings = payload.get("findings")
     sources = payload.get("sources")
-    return bool(
-        summary
-        or (isinstance(findings, list) and len(findings) > 0)
-        or (isinstance(sources, list) and len(sources) > 0)
-    )
+    if isinstance(findings, list):
+        for finding in findings:
+            if isinstance(finding, dict) and _safe_http_url(finding.get("url"), 500):
+                return True
+    if isinstance(sources, list):
+        for source in sources:
+            if isinstance(source, dict) and _safe_http_url(source.get("url"), 500):
+                return True
+    return False
 
 
 def _tool_payloads_have_public_web_evidence(messages: list[dict[str, Any]]) -> bool:
@@ -1339,7 +1427,7 @@ def _bounded_area_risk_evidence(evidence: list[dict[str, Any]]) -> list[dict[str
             continue
         bounded.append({
             "title": _trim_text(item.get("title"), 180),
-            "url": _trim_text(item.get("url"), 400),
+            "url": _safe_http_url(item.get("url"), 400),
             "source": _trim_text(item.get("source") or item.get("sourceName"), 120),
             "published_at": _trim_text(item.get("published_at") or item.get("publishedAt") or item.get("date"), 80),
             "snippet": _trim_text(item.get("snippet") or item.get("description") or item.get("summary"), 420),
@@ -1483,7 +1571,7 @@ def fallback_safe_route_area_risk_candidates(
     candidates: dict[str, dict[str, Any]] = {}
 
     for item in bounded_evidence:
-        url = _trim_text(item.get("url"), 400)
+        url = _safe_http_url(item.get("url"), 400)
         if not url:
             continue
         title = _trim_text(item.get("title"), 180)
@@ -1606,12 +1694,13 @@ def normalize_public_web_search_payload(payload: dict[str, Any], *, query: str) 
         if not isinstance(item, dict):
             continue
         claim = _trim_text(item.get("claim") or item.get("finding") or item.get("summary"), 360)
-        if not claim:
+        url = _safe_http_url(item.get("url"), 500)
+        if not claim or not url:
             continue
         finding = {
             "claim": claim,
             "source": _trim_text(item.get("source") or item.get("publisher") or item.get("title"), 160),
-            "url": _safe_http_url(item.get("url"), 500),
+            "url": url,
             "date": _trim_text(item.get("date") or item.get("published_at") or item.get("publishedAt"), 80),
         }
         findings.append({key: value for key, value in finding.items() if value})
@@ -1628,7 +1717,7 @@ def normalize_public_web_search_payload(payload: dict[str, Any], *, query: str) 
             continue
         url = _safe_http_url(item.get("url"), 500)
         title = _trim_text(item.get("title") or item.get("source") or item.get("publisher"), 180)
-        if not url and not title:
+        if not url:
             continue
         if url and url in seen_urls:
             continue
@@ -2085,6 +2174,16 @@ async def run_openai_responses_analysis(prompt: str, *, model: str | None = None
 
 async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: str | None) -> str:
     if not str(settings.backend_base_url or "").strip() or not str(session_id or "").strip():
+        if _request_wants_public_web_context(messages) or _request_wants_graph_wide_context(messages):
+            return json.dumps({
+                "reply": (
+                    "I can’t safely answer that as a current or graph-wide intelligence question because "
+                    "the Explorer Agent tool session is not available. Please reopen Lunar Explorer Agent "
+                    "or try again so I can query the Intelligence Graph and web evidence."
+                ),
+                "actions": [],
+                "follow_ups": [],
+            })
         return await run_openai_analysis(messages)
 
     working_messages: list[dict[str, Any]] = list(messages)
@@ -2191,7 +2290,7 @@ async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: st
                     ),
                 })
                 continue
-            return _trim_text(content_text, _reply_char_limit())
+            return _trim_text(_sanitize_scope_actions_for_tool_evidence(content_text, working_messages), _reply_char_limit())
 
     if saw_tool_result:
         return await _synthesize_with_rescue_tool_evidence(working_messages, session_id)

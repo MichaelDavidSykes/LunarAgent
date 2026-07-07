@@ -469,6 +469,15 @@ def test_tool_specs_include_public_web_search():
     assert "search_public_web" in tool_names
 
 
+def test_safe_http_url_rejects_internal_and_special_hosts():
+    assert service_module._safe_http_url("http://[::1]/") == ""
+    assert service_module._safe_http_url("http://169.254.169.254/latest") == ""
+    assert service_module._safe_http_url("http://0.0.0.0/") == ""
+    assert service_module._safe_http_url("http://2130706433/") == ""
+    assert service_module._safe_http_url("http://service.localhost/") == ""
+    assert service_module._safe_http_url("https://example.test/report") == "https://example.test/report"
+
+
 def test_respond_filters_ordinary_ui_actions_when_ui_actions_disabled(monkeypatch):
     async def fake_tool_aware_analysis(messages, session_id=None):
         return json.dumps(
@@ -509,14 +518,7 @@ def test_respond_filters_ordinary_ui_actions_when_ui_actions_disabled(monkeypatc
         )
     )
 
-    assert payload["actions"] == [
-        {
-            "type": "apply_graph_query_scope",
-            "label": "Scope Explorer to this investigation",
-            "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
-            "queryPreview": "Graph investigation",
-        }
-    ]
+    assert payload["actions"] == []
 
 
 def test_respond_allows_save_scope_action_when_user_explicitly_asks_to_save(monkeypatch):
@@ -551,7 +553,161 @@ def test_respond_allows_save_scope_action_when_user_explicitly_asks_to_save(monk
         )
     )
 
-    assert payload["actions"][0]["type"] == "save_and_apply_graph_query_scope"
+    assert payload["actions"] == []
+
+
+def test_tool_aware_analysis_allows_verified_graph_scope_action(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
+
+    async def fake_chat_completion(messages, tools=None, *, model=None):
+        if not service_module._tool_was_called(messages, "search_intelligence_graph"):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-graph",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_intelligence_graph",
+                                        "arguments": json.dumps({"query": "South Africa"}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "reply": "Found graph-wide intelligence.",
+                                "actions": [
+                                    {
+                                        "type": "apply_graph_query_scope",
+                                        "label": "Scope Explorer to this investigation",
+                                        "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+                                        "queryPreview": "Graph investigation",
+                                    }
+                                ],
+                                "follow_ups": [],
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    async def fake_execute_tool(tool_name, arguments, session_id):
+        assert tool_name == "search_intelligence_graph"
+        return {
+            "reports": [{"name": "Graph report"}],
+            "explorerScope": {
+                "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+                "queryPreview": "Graph investigation",
+            },
+        }
+
+    monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
+    monkeypatch.setattr(service_module, "_execute_tool_call", fake_execute_tool)
+
+    raw = asyncio.run(
+        service_module.run_tool_aware_analysis(
+            [{"role": "user", "content": "Investigate South Africa"}],
+            "session-1",
+        )
+    )
+    payload = service_module.normalize_model_response(raw)
+    payload["actions"] = service_module._filter_response_actions_for_ui_policy(
+        payload["actions"],
+        allow_ui_actions=False,
+        user_message="Investigate South Africa",
+    )
+
+    assert payload["actions"] == [
+        {
+            "type": "apply_graph_query_scope",
+            "label": "Scope Explorer to this investigation",
+            "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+            "queryPreview": "Graph investigation",
+        }
+    ]
+
+
+def test_tool_aware_analysis_strips_unverified_graph_scope_action(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
+
+    async def fake_chat_completion(messages, tools=None, *, model=None):
+        if not service_module._tool_was_called(messages, "search_intelligence_graph"):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-graph",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_intelligence_graph",
+                                        "arguments": json.dumps({"query": "South Africa"}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "reply": "Found graph-wide intelligence.",
+                                "actions": [
+                                    {
+                                        "type": "apply_graph_query_scope",
+                                        "label": "Scope Explorer to this investigation",
+                                        "compiledAql": "FOR doc IN other_collection RETURN doc",
+                                        "queryPreview": "Hallucinated scope",
+                                    }
+                                ],
+                                "follow_ups": [],
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    async def fake_execute_tool(tool_name, arguments, session_id):
+        assert tool_name == "search_intelligence_graph"
+        return {
+            "reports": [{"name": "Graph report"}],
+            "explorerScope": {
+                "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+                "queryPreview": "Graph investigation",
+            },
+        }
+
+    monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
+    monkeypatch.setattr(service_module, "_execute_tool_call", fake_execute_tool)
+
+    raw = asyncio.run(
+        service_module.run_tool_aware_analysis(
+            [{"role": "user", "content": "Investigate South Africa"}],
+            "session-1",
+        )
+    )
+    payload = service_module.normalize_model_response(raw)
+
+    assert payload["actions"] == []
 
 
 def test_public_web_error_or_disabled_payloads_are_not_evidence():
@@ -591,12 +747,49 @@ def test_public_web_error_or_disabled_payloads_are_not_evidence():
                     "tool": "search_public_web",
                     "status": "success",
                     "summary": "Current public reporting adds context.",
-                    "findings": [{"claim": "A public source reported an update."}],
+                    "findings": [{"claim": "A public source reported an update.", "url": "https://example.test/update"}],
                     "sources": [],
                 }
             ),
         }
     ]) is True
+
+
+def test_public_web_summary_without_sources_is_not_evidence():
+    payload = service_module.normalize_public_web_search_payload(
+        {
+            "summary": "Uncited public web summary.",
+            "findings": [{"claim": "Uncited claim"}],
+            "sources": [{"title": "Source without URL"}],
+        },
+        query="South Africa",
+    )
+
+    assert payload["findings"] == []
+    assert payload["sources"] == []
+    assert service_module._tool_payloads_have_public_web_evidence([
+        {"role": "tool", "content": json.dumps({**payload, "status": "success"})}
+    ]) is False
+
+
+def test_tool_aware_analysis_refuses_broad_answer_without_backend_tools(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "")
+
+    async def fail_openai_analysis(*_args, **_kwargs):  # pragma: no cover - regression guard
+        raise AssertionError("broad/current requests should not fall back to generic model answers without tools")
+
+    monkeypatch.setattr(service_module, "run_openai_analysis", fail_openai_analysis)
+
+    raw = asyncio.run(
+        service_module.run_tool_aware_analysis(
+            [{"role": "user", "content": "What's happening in South Africa today?"}],
+            "session-1",
+        )
+    )
+    payload = json.loads(raw)
+
+    assert payload["actions"] == []
+    assert "tool session is not available" in payload["reply"]
 
 
 def test_execute_public_web_search_tool_normalizes_web_research(monkeypatch):
@@ -1267,6 +1460,36 @@ def test_area_risk_evidence_fallback_extracts_source_backed_localities():
     assert {"Nyanga", "Delft", "Khayelitsha"}.issubset(labels)
     assert "Cape Town" not in labels
     assert all(zone["evidence_urls"] for zone in zones)
+
+
+def test_area_risk_evidence_fallback_ignores_unsafe_urls():
+    zones = service_module.fallback_safe_route_area_risk_candidates(
+        aoi={
+            "labelContext": {
+                "place": "Cape Town",
+                "country": "South Africa",
+                "display": "Cape Town, Western Cape, South Africa",
+            }
+        },
+        evidence=[
+            {
+                "title": "Nyanga robbery hotspot",
+                "url": "http://169.254.169.254/latest",
+                "snippet": "Nyanga robbery and violence reports affect route safety.",
+            },
+            {
+                "title": "Delft robbery hotspot",
+                "url": "https://example.test/delft",
+                "snippet": "Delft robbery and violence reports affect route safety.",
+            },
+        ],
+        max_zones=6,
+    )
+
+    labels = {zone["label"] for zone in zones}
+    assert "Nyanga" not in labels
+    assert "Delft" in labels
+    assert all(url.startswith("https://example.test/") for zone in zones for url in zone["evidence_urls"])
 
 
 def test_area_risk_evidence_failure_uses_deterministic_fallback(monkeypatch):
