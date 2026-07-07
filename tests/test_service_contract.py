@@ -399,6 +399,42 @@ def test_build_prompt_messages_keeps_ui_actions_disabled_until_allowed():
     assert any("do not ask permission" in item for item in prompt_payload["instructions"])
 
 
+def test_broad_current_request_is_not_scope_limited_by_history():
+    messages = build_prompt_messages(
+        session_id="session-1",
+        allow_ui_actions=False,
+        conversation_history=[
+            {"role": "user", "content": "What does the current scope say?"},
+            {"role": "assistant", "content": "I inspected these scoped reports."},
+        ],
+        query_preview="FOR doc IN reports RETURN doc",
+        summary={},
+        context={},
+        user_message="What's happening in South Africa today?",
+    )
+
+    assert service_module._request_wants_public_web_context(messages) is True
+    assert service_module._request_wants_graph_wide_context(messages) is True
+
+
+def test_latest_scope_limited_request_still_stays_in_scope():
+    messages = build_prompt_messages(
+        session_id="session-1",
+        allow_ui_actions=False,
+        conversation_history=[
+            {"role": "user", "content": "What's happening in South Africa today?"},
+            {"role": "assistant", "content": "I searched the wider graph and web."},
+        ],
+        query_preview="FOR doc IN reports RETURN doc",
+        summary={},
+        context={},
+        user_message="What do these current scope reports say?",
+    )
+
+    assert service_module._request_wants_public_web_context(messages) is False
+    assert service_module._request_wants_graph_wide_context(messages) is False
+
+
 def test_build_prompt_messages_declares_allowed_actions_when_enabled():
     messages = build_prompt_messages(
         session_id=None,
@@ -431,6 +467,136 @@ def test_tool_specs_include_public_web_search():
     tool_names = [tool["function"]["name"] for tool in service_module._tool_specs()]
 
     assert "search_public_web" in tool_names
+
+
+def test_respond_filters_ordinary_ui_actions_when_ui_actions_disabled(monkeypatch):
+    async def fake_tool_aware_analysis(messages, session_id=None):
+        return json.dumps(
+            {
+                "reply": "Found graph-wide intelligence.",
+                "actions": [
+                    {"type": "open_map", "label": "Open map"},
+                    {"type": "focus_country", "label": "Focus Germany", "countryName": "Germany"},
+                    {
+                        "type": "apply_graph_query_scope",
+                        "label": "Scope Explorer to this investigation",
+                        "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+                        "queryPreview": "Graph investigation",
+                    },
+                    {
+                        "type": "save_and_apply_graph_query_scope",
+                        "label": "Save query and scope Explorer",
+                        "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+                        "queryPreview": "Graph investigation",
+                        "savedQueryName": "Unexpected saved query",
+                    },
+                ],
+                "follow_ups": ["Should be kept"],
+            }
+        )
+
+    monkeypatch.setattr(service_module, "run_tool_aware_analysis", fake_tool_aware_analysis)
+
+    payload = asyncio.run(
+        service_module.respond(
+            session_id="session-1",
+            allow_ui_actions=False,
+            conversation_history=[],
+            query_preview="FOR doc IN reports RETURN doc",
+            summary={},
+            context={},
+            user_message="Investigate South Africa",
+        )
+    )
+
+    assert payload["actions"] == [
+        {
+            "type": "apply_graph_query_scope",
+            "label": "Scope Explorer to this investigation",
+            "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+            "queryPreview": "Graph investigation",
+        }
+    ]
+
+
+def test_respond_allows_save_scope_action_when_user_explicitly_asks_to_save(monkeypatch):
+    async def fake_tool_aware_analysis(messages, session_id=None):
+        return json.dumps(
+            {
+                "reply": "Prepared the saved query.",
+                "actions": [
+                    {
+                        "type": "save_and_apply_graph_query_scope",
+                        "label": "Save query and scope Explorer",
+                        "compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc",
+                        "queryPreview": "Graph investigation",
+                        "savedQueryName": "South Africa watch",
+                    }
+                ],
+                "follow_ups": [],
+            }
+        )
+
+    monkeypatch.setattr(service_module, "run_tool_aware_analysis", fake_tool_aware_analysis)
+
+    payload = asyncio.run(
+        service_module.respond(
+            session_id="session-1",
+            allow_ui_actions=False,
+            conversation_history=[],
+            query_preview="FOR doc IN reports RETURN doc",
+            summary={},
+            context={},
+            user_message="Save this South Africa investigation as a query and scope Explorer to it",
+        )
+    )
+
+    assert payload["actions"][0]["type"] == "save_and_apply_graph_query_scope"
+
+
+def test_public_web_error_or_disabled_payloads_are_not_evidence():
+    assert service_module._tool_payloads_have_public_web_evidence([
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "search_public_web",
+                    "status": "error",
+                    "summary": "Public web research failed for this turn.",
+                    "findings": [],
+                    "sources": [],
+                }
+            ),
+        }
+    ]) is False
+    assert service_module._tool_payloads_have_public_web_evidence([
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "search_public_web",
+                    "status": "disabled",
+                    "summary": "Public web research is disabled.",
+                    "findings": [],
+                    "sources": [],
+                }
+            ),
+        }
+    ]) is False
+    assert service_module._tool_payloads_have_public_web_evidence([
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "search_public_web",
+                    "status": "success",
+                    "summary": "Current public reporting adds context.",
+                    "findings": [{"claim": "A public source reported an update."}],
+                    "sources": [],
+                }
+            ),
+        }
+    ]) is True
 
 
 def test_execute_public_web_search_tool_normalizes_web_research(monkeypatch):
@@ -574,6 +740,107 @@ def test_tool_aware_analysis_requires_web_after_graph_for_current_public_context
 
     assert [tool_name for tool_name, *_ in executed_tools] == ["search_intelligence_graph", "search_public_web"]
     assert "public web" in payload["reply"].lower()
+
+
+def test_tool_aware_analysis_allows_final_answer_after_failed_web_attempt(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
+    monkeypatch.setattr(service_module.settings, "web_research_enabled", True)
+
+    calls = []
+    executed_tools = []
+
+    async def fake_chat_completion(messages, tools=None, *, model=None):
+        calls.append({"messages": list(messages), "tools": tools, "model": model})
+        if len(calls) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-graph",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_intelligence_graph",
+                                        "arguments": json.dumps({"query": "South Africa"}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        if len(calls) == 2:
+            return {"choices": [{"message": {"content": "{\"reply\":\"premature graph-only\",\"actions\":[],\"follow_ups\":[]}"}}]}
+        if len(calls) == 3:
+            last_system = calls[-1]["messages"][-1]["content"]
+            assert "search_public_web" in last_system
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-web",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_public_web",
+                                        "arguments": json.dumps({"query": "South Africa latest developments"}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "reply": "Graph evidence is available, but public web research failed this turn.",
+                                "actions": [],
+                                "follow_ups": [],
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    async def fake_execute_tool(tool_name, arguments, session_id):
+        executed_tools.append((tool_name, arguments, session_id))
+        if tool_name == "search_intelligence_graph":
+            return {
+                "summary": {"reportCount": 1},
+                "reports": [{"name": "Graph report", "contentSnippet": "Graph-backed incident context."}],
+                "explorerScope": {"compiledAql": "FOR doc IN nodes_vertex_collection RETURN doc"},
+            }
+        assert tool_name == "search_public_web"
+        return {
+            "tool": "search_public_web",
+            "status": "error",
+            "summary": "Public web research failed for this turn.",
+            "findings": [],
+            "sources": [],
+        }
+
+    monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
+    monkeypatch.setattr(service_module, "_execute_tool_call", fake_execute_tool)
+
+    raw = asyncio.run(
+        service_module.run_tool_aware_analysis(
+            [{"role": "user", "content": "What's happening in South Africa today?"}],
+            "session-1",
+        )
+    )
+    payload = json.loads(raw)
+
+    assert [tool_name for tool_name, *_ in executed_tools] == ["search_intelligence_graph", "search_public_web"]
+    assert "web research failed" in payload["reply"]
 
 
 def test_tool_aware_analysis_broad_request_does_not_stop_at_current_scope(monkeypatch):

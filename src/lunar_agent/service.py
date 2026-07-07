@@ -637,6 +637,28 @@ def normalize_model_response(raw_text: str) -> dict[str, Any]:
     return normalize_response_payload(parsed)
 
 
+def _filter_response_actions_for_ui_policy(
+    actions: Any,
+    *,
+    allow_ui_actions: bool,
+    user_message: str,
+) -> list[dict[str, Any]]:
+    normalized_actions = [action for action in (actions or []) if isinstance(action, dict)]
+    if allow_ui_actions:
+        return normalized_actions[:3]
+
+    if _request_wants_saved_query(user_message):
+        for action in normalized_actions:
+            if action.get("type") == "save_and_apply_graph_query_scope":
+                return [action]
+
+    for action in normalized_actions:
+        if action.get("type") == "apply_graph_query_scope":
+            return [action]
+
+    return []
+
+
 def _tool_result_payloads(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
     for message in messages:
@@ -877,11 +899,32 @@ def _tool_payloads_have_graph_evidence(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _public_web_payload_has_evidence(payload: dict[str, Any]) -> bool:
+    if payload.get("tool") != "search_public_web":
+        return False
+    status = str(payload.get("status") or "success").strip().lower()
+    if status not in {"success", "ok", "completed"}:
+        return False
+    summary = _trim_text(payload.get("summary") or payload.get("answer"), 1200)
+    findings = payload.get("findings")
+    sources = payload.get("sources")
+    return bool(
+        summary
+        or (isinstance(findings, list) and len(findings) > 0)
+        or (isinstance(sources, list) and len(sources) > 0)
+    )
+
+
 def _tool_payloads_have_public_web_evidence(messages: list[dict[str, Any]]) -> bool:
+    return any(_public_web_payload_has_evidence(payload) for payload in _tool_result_payloads(messages))
+
+
+def _tool_payloads_have_public_web_unavailable(messages: list[dict[str, Any]]) -> bool:
     for payload in _tool_result_payloads(messages):
         if payload.get("tool") != "search_public_web":
             continue
-        if payload.get("summary") or payload.get("findings") or payload.get("sources"):
+        status = str(payload.get("status") or "").strip().lower()
+        if status in {"error", "failed", "disabled", "unavailable"} or payload.get("error"):
             return True
     return False
 
@@ -921,15 +964,14 @@ def _request_mentions_current_scope(text: str) -> bool:
 
 
 def _request_wants_public_web_context(messages: list[dict[str, Any]]) -> bool:
-    text = _conversation_search_text(messages, max_len=1400)
     latest = _latest_user_request_text(messages)
-    combined = f"{latest} | {text}".lower()
-    if _request_mentions_current_scope(combined) and not any(
-        term in combined for term in ("web", "internet", "browse", "google", "public sources", "outside the graph")
+    latest_lower = latest.lower()
+    if _request_mentions_current_scope(latest_lower) and not any(
+        term in latest_lower for term in ("web", "internet", "browse", "google", "public sources", "outside the graph")
     ):
         return False
     return any(
-        re.search(pattern, combined)
+        re.search(pattern, latest_lower)
         for pattern in (
             r"\b(?:web|internet|browse|browser|search online|public sources|outside the graph)\b",
             r"\b(?:latest|current|currently|today|yesterday|overnight|this week|recent|news|updates|developments)\b",
@@ -943,7 +985,21 @@ def _request_wants_graph_wide_context(messages: list[dict[str, Any]]) -> bool:
     latest = _latest_user_request_text(messages)
     latest_lower = latest.lower()
     combined = f"{latest} | {text}".lower()
-    explicitly_scope_limited = _request_mentions_current_scope(combined)
+    latest_explicitly_scope_limited = _request_mentions_current_scope(latest_lower)
+    latest_explicitly_wide = bool(
+        re.search(
+            r"\b(?:full|whole|entire|wider|broader|complete|all)\s+(?:intelligence\s+)?graph\b",
+            latest_lower,
+        )
+        or re.search(r"\b(?:graph-wide|full-graph|wider graph|broader graph)\b", latest_lower)
+        or re.search(r"\b(?:beyond|outside)\s+(?:the\s+)?(?:current\s+)?scope\b", latest_lower)
+    )
+    if latest_explicitly_wide:
+        return True
+    if latest_explicitly_scope_limited:
+        return False
+    if _request_wants_public_web_context(messages):
+        return True
     explicitly_wide = bool(
         re.search(
             r"\b(?:full|whole|entire|wider|broader|complete|all)\s+(?:intelligence\s+)?graph\b",
@@ -953,10 +1009,6 @@ def _request_wants_graph_wide_context(messages: list[dict[str, Any]]) -> bool:
         or re.search(r"\b(?:beyond|outside)\s+(?:the\s+)?(?:current\s+)?scope\b", combined)
     )
     if explicitly_wide:
-        return True
-    if explicitly_scope_limited:
-        return False
-    if _request_wants_public_web_context(messages):
         return True
     return bool(
         re.search(
@@ -1044,8 +1096,7 @@ def _synthesize_tool_backed_response(messages: list[dict[str, Any]]) -> str:
         (
             payload
             for payload in reversed(payloads)
-            if payload.get("tool") == "search_public_web"
-            and (payload.get("summary") or payload.get("findings") or payload.get("sources"))
+            if _public_web_payload_has_evidence(payload)
         ),
         None,
     )
@@ -2130,6 +2181,7 @@ async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: st
                 wants_public_web_context
                 and settings.web_research_enabled
                 and not _tool_payloads_have_public_web_evidence(working_messages)
+                and not _tool_payloads_have_public_web_unavailable(working_messages)
             ):
                 working_messages.append({
                     "role": "system",
@@ -2416,5 +2468,10 @@ async def respond(
     )
     raw_answer = await run_tool_aware_analysis(messages, session_id=session_id)
     normalized = normalize_model_response(raw_answer)
+    normalized["actions"] = _filter_response_actions_for_ui_policy(
+        normalized.get("actions"),
+        allow_ui_actions=allow_ui_actions,
+        user_message=user_message,
+    )
     normalized["model"] = settings.model
     return normalized
