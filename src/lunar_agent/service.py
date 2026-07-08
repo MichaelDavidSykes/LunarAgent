@@ -1741,6 +1741,35 @@ def normalize_public_web_search_payload(payload: dict[str, Any], *, query: str) 
     }
 
 
+def _tool_parameters(
+    properties: dict[str, Any],
+    *,
+    required: list[str] | None = None,
+) -> dict[str, Any]:
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": False,
+    }
+    if required:
+        parameters["required"] = required
+    return parameters
+
+
+def _report_detail_tool_spec(name: str, description: str) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": _tool_parameters(
+                {"report_id": {"type": "string"}},
+                required=["report_id"],
+            ),
+        },
+    }
+
+
 def _tool_specs() -> list[dict[str, Any]]:
     return [
         {
@@ -1748,13 +1777,9 @@ def _tool_specs() -> list[dict[str, Any]]:
             "function": {
                 "name": "list_scope_reports",
                 "description": "Read the most relevant reports in the current Explorer scope before summarizing what the intelligence says.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 12}
-                    },
-                    "additionalProperties": False,
-                },
+                "parameters": _tool_parameters(
+                    {"limit": {"type": "integer", "minimum": 1, "maximum": 12}},
+                ),
             },
         },
         {
@@ -1762,32 +1787,19 @@ def _tool_specs() -> list[dict[str, Any]]:
             "function": {
                 "name": "search_scope_reports",
                 "description": "Search scoped reports for an actor, location, IOC, organization, phrase, or topic and return matching report snippets.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
+                "parameters": _tool_parameters(
+                    {
                         "query": {"type": "string"},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 10},
                     },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
+                    required=["query"],
+                ),
             },
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_scope_report_detail",
-                "description": "Read fuller detail for one scoped report before making a report-level claim.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "report_id": {"type": "string"}
-                    },
-                    "required": ["report_id"],
-                    "additionalProperties": False,
-                },
-            },
-        },
+        _report_detail_tool_spec(
+            "get_scope_report_detail",
+            "Read fuller detail for one scoped report before making a report-level claim.",
+        ),
         {
             "type": "function",
             "function": {
@@ -1796,18 +1808,16 @@ def _tool_specs() -> list[dict[str, Any]]:
                     "Search the public internet for current source-backed context. "
                     "Use after LunarGraph search for broad/current questions, or when the graph is sparse/stale."
                 ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
+                "parameters": _tool_parameters(
+                    {
                         "query": {"type": "string", "description": "Public web search query."},
                         "focus": {"type": "string", "description": "Optional aspect to emphasize, such as unrest, cyber, shipping, politics, or public safety."},
                         "region": {"type": "string", "description": "Optional country/region to constrain results."},
                         "recency_days": {"type": "integer", "minimum": 1, "maximum": 3650},
                         "max_sources": {"type": "integer", "minimum": 2, "maximum": 10},
                     },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
+                    required=["query"],
+                ),
             },
         },
         {
@@ -1815,11 +1825,7 @@ def _tool_specs() -> list[dict[str, Any]]:
             "function": {
                 "name": "graph_schema_context",
                 "description": "Get LunarGraph schema, canonical collections, aliases, relationship guidance, and query examples before writing custom AQL.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
+                "parameters": _tool_parameters({}),
             },
         },
         {
@@ -1827,9 +1833,8 @@ def _tool_specs() -> list[dict[str, Any]]:
             "function": {
                 "name": "search_intelligence_graph",
                 "description": "Search the wider Intelligence Graph beyond the current Explorer scope and return report snippets, summary evidence, and an Explorer-compatible scope query.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
+                "parameters": _tool_parameters(
+                    {
                         "query": {"type": "string"},
                         "terms": {
                             "type": "array",
@@ -1845,9 +1850,8 @@ def _tool_specs() -> list[dict[str, Any]]:
                         "created_to": {"type": "string", "description": "Optional ISO date upper bound."},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 30},
                     },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
+                    required=["query"],
+                ),
             },
         },
         {
@@ -1855,34 +1859,21 @@ def _tool_specs() -> list[dict[str, Any]]:
             "function": {
                 "name": "run_graph_read_query",
                 "description": "Execute custom bounded read-only AQL against the wider Intelligence Graph. Use after graph_schema_context when search_intelligence_graph is insufficient.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
+                "parameters": _tool_parameters(
+                    {
                         "query": {"type": "string"},
                         "bind_vars": {"type": "object"},
                         "result_limit": {"type": "integer", "minimum": 1, "maximum": 150},
                         "max_runtime_seconds": {"type": "number", "minimum": 1, "maximum": 30},
                     },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
+                    required=["query"],
+                ),
             },
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_graph_report_detail",
-                "description": "Read fuller detail for one graph-wide report returned by search_intelligence_graph before making a precise report-level claim.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "report_id": {"type": "string"}
-                    },
-                    "required": ["report_id"],
-                    "additionalProperties": False,
-                },
-            },
-        },
+        _report_detail_tool_spec(
+            "get_graph_report_detail",
+            "Read fuller detail for one graph-wide report returned by search_intelligence_graph before making a precise report-level claim.",
+        ),
     ]
 
 
