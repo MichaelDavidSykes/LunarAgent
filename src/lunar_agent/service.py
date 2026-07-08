@@ -843,10 +843,7 @@ def _facet_names(facets: Any, key: str, limit: int = 8) -> list[str]:
     names: list[str] = []
     seen: set[str] = set()
     for item in raw_items:
-        if isinstance(item, dict):
-            value = item.get("name")
-        else:
-            value = item
+        value = item.get("name") if isinstance(item, dict) else item
         _append_unique_text(names, seen, value, 100)
         if len(names) >= limit:
             break
