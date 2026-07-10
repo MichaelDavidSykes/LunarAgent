@@ -19,7 +19,7 @@ This keeps auth and graph access in the backend while still letting the agent do
 
 ### `GET /health`
 
-Returns service health and the configured model.
+Returns service health and the configured model. It returns `503` if shared-token authentication is not configured.
 
 ### `POST /v1/explorer-agent/respond`
 
@@ -64,7 +64,7 @@ Optional:
 - `LUNAR_AGENT_WEB_SEARCH_CONTEXT_SIZE` (default `medium`)
 - `LUNAR_AGENT_WEB_REASONING_EFFORT` (default `low`)
 - `LUNAR_AGENT_WEB_MAX_OUTPUT_TOKENS` (default `1000`)
-- `LUNAR_AGENT_SHARED_TOKEN`
+- `LUNAR_AGENT_SHARED_TOKEN` (required; the service fails closed without it)
 - `LUNAR_AGENT_BACKEND_BASE_URL`
 - `LUNAR_AGENT_BACKEND_SHARED_TOKEN`
 - `LUNAR_AGENT_BACKEND_HTTP_TIMEOUT`
@@ -75,7 +75,7 @@ Optional:
 - `LUNAR_AGENT_AREA_RISK_MAX_ZONES` (default `6`)
 - `LUNAR_AGENT_AREA_RISK_FALLBACK_ON_EMPTY_WEB` (default `false`, avoids a second model call when web research returns no named zones)
 
-If `LUNAR_AGENT_SHARED_TOKEN` is set, callers must send:
+Callers must send the configured `LUNAR_AGENT_SHARED_TOKEN`:
 
 ```http
 Authorization: Bearer <token>
