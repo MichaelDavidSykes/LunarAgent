@@ -183,6 +183,109 @@ def _extract_responses_text(data: dict[str, Any]) -> str:
     return "\n".join(parts).strip()
 
 
+def _append_web_source(
+    sources: list[dict[str, str]],
+    seen_urls: set[str],
+    *,
+    url: Any,
+    title: Any = None,
+    publisher: Any = None,
+    date: Any = None,
+    max_sources: int = 10,
+) -> None:
+    if len(sources) >= max_sources:
+        return
+    safe_url = _safe_http_url(url, 500)
+    if not safe_url or safe_url in seen_urls:
+        return
+    source = {
+        "title": _trim_text(title, 180),
+        "publisher": _trim_text(publisher, 140),
+        "url": safe_url,
+        "date": _trim_text(date, 80),
+    }
+    sources.append({key: value for key, value in source.items() if value})
+    seen_urls.add(safe_url)
+
+
+def _extract_response_web_sources(data: Any, *, max_sources: int = 10) -> list[dict[str, str]]:
+    sources: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    def visit(node: Any) -> None:
+        if len(sources) >= max_sources:
+            return
+        if isinstance(node, list):
+            for item in node:
+                visit(item)
+            return
+        if not isinstance(node, dict):
+            return
+
+        node_type = str(node.get("type") or node.get("annotation_type") or "").strip().lower()
+        raw_url = node.get("url") or node.get("uri")
+        if raw_url and (
+            "citation" in node_type
+            or "web" in node_type
+            or "url" in node_type
+            or node.get("title")
+            or node.get("source")
+            or node.get("publisher")
+        ):
+            _append_web_source(
+                sources,
+                seen_urls,
+                url=raw_url,
+                title=node.get("title") or node.get("source") or node.get("name"),
+                publisher=node.get("publisher") or node.get("source"),
+                date=node.get("date") or node.get("published_at") or node.get("publishedAt"),
+                max_sources=max_sources,
+            )
+
+        for value in node.values():
+            visit(value)
+
+    visit(data)
+    return sources
+
+
+def _merge_response_web_sources(raw_text: str, sources: list[dict[str, str]]) -> str:
+    if not sources:
+        return raw_text
+
+    parsed = _safe_parse_json_object(raw_text)
+    if not isinstance(parsed, dict):
+        return json.dumps(
+            {
+                "summary": _trim_text(raw_text, 2200),
+                "findings": [],
+                "sources": sources[:10],
+            },
+            ensure_ascii=False,
+        )
+
+    merged = dict(parsed)
+    raw_sources = merged.get("sources")
+    existing_sources = raw_sources if isinstance(raw_sources, list) else []
+    normalized_existing = normalize_public_web_search_payload(
+        {"sources": existing_sources},
+        query=_trim_text(merged.get("query"), 500),
+    )["sources"]
+    seen_urls = {source["url"] for source in normalized_existing if source.get("url")}
+    next_sources: list[dict[str, str]] = list(normalized_existing)
+    for source in sources:
+        _append_web_source(
+            next_sources,
+            seen_urls,
+            url=source.get("url"),
+            title=source.get("title"),
+            publisher=source.get("publisher"),
+            date=source.get("date"),
+        )
+    merged["sources"] = next_sources
+    return json.dumps(merged, ensure_ascii=False)
+
+
 def _normalize_text_list(value: Any, max_items: int = 4, max_len: int = 140) -> list[str]:
     if isinstance(value, str):
         candidates = [line.strip("-• \t") for line in value.splitlines() if line.strip()]
@@ -608,8 +711,14 @@ def build_prompt_messages(
 
 
 def normalize_response_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    wrapped_reply_payload = _extract_wrapped_reply_payload(payload.get("reply"))
-    reply = _normalize_reply_text(payload.get("reply"), _reply_char_limit())
+    reply_value = (
+        payload.get("reply")
+        or payload.get("answer")
+        or payload.get("message")
+        or payload.get("content")
+    )
+    wrapped_reply_payload = _extract_wrapped_reply_payload(reply_value)
+    reply = _normalize_reply_text(reply_value, _reply_char_limit())
     actions = []
     for action in payload.get("actions") or (wrapped_reply_payload or {}).get("actions") or []:
         normalized = _normalize_action(action)
@@ -1161,6 +1270,22 @@ def _synthesize_public_web_lines(payload: dict[str, Any]) -> list[str]:
             finding_lines.append(f"- {claim}{citation}")
         if finding_lines:
             lines.append("Public web findings:\n" + "\n".join(finding_lines))
+
+    sources = payload.get("sources")
+    if isinstance(sources, list) and sources:
+        source_links: list[str] = []
+        seen_urls: set[str] = set()
+        for item in sources[:6]:
+            if not isinstance(item, dict):
+                continue
+            url = _safe_http_url(item.get("url"), 320)
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            title = _trim_text(item.get("title") or item.get("publisher") or item.get("source") or "source", 120)
+            source_links.append(f"[{title}]({url})")
+        if source_links:
+            lines.append("Sources: " + ", ".join(source_links))
     return lines
 
 
@@ -2003,11 +2128,18 @@ async def _execute_tool_call(name: str, arguments: dict[str, Any], session_id: s
         )
 
     if name == "run_graph_read_query":
+        query = _trim_text(arguments.get("query"), 20000)
+        if not _looks_like_read_only_aql(query):
+            return {
+                "tool": "run_graph_read_query",
+                "status": "error",
+                "error": "Graph read query must be non-empty, read-only AQL.",
+            }
         return await _call_backend_tool(
             "/api/v1/graph/ai-agent/tools/run-graph-read-query",
             {
                 "session_id": scoped_session_id,
-                "query": _trim_text(arguments.get("query"), 20000),
+                "query": query,
                 "bind_vars": arguments.get("bind_vars") if isinstance(arguments.get("bind_vars"), dict) else {},
                 "result_limit": max(1, min(int(arguments.get("result_limit") or 80), 150)),
                 "max_runtime_seconds": max(1, min(float(arguments.get("max_runtime_seconds") or 18), 30)),
@@ -2131,13 +2263,14 @@ async def run_openai_web_research(
                 continue
             if response.status_code < 400:
                 data = response.json() if response.content else {}
+                response_sources = _extract_response_web_sources(data)
                 parsed_text = _extract_responses_text(data)
                 if parsed_text:
-                    return parsed_text
+                    return _merge_response_web_sources(parsed_text, response_sources)
                 return json.dumps({
                     "summary": "Public web research returned no extractable text for this query.",
                     "findings": [],
-                    "sources": [],
+                    "sources": response_sources,
                 })
             last_error = f"Responses API returned HTTP {response.status_code}: {response.text[:400]}"
     raise RuntimeError(last_error or "Responses API web research failed")
@@ -2158,6 +2291,18 @@ async def run_openai_responses_analysis(prompt: str, *, model: str | None = None
     if parsed_text:
         return parsed_text
     raise RuntimeError("Responses API returned no text")
+
+
+def _required_tool_lookup_failed_response() -> str:
+    return json.dumps({
+        "reply": (
+            "I could not complete the required Intelligence Graph/web lookup for this current or graph-wide "
+            "question, so I won’t answer from generic model knowledge. Please try again so I can ground the "
+            "response in LunarGraph and source-backed web evidence."
+        ),
+        "actions": [],
+        "follow_ups": [],
+    })
 
 
 async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: str | None) -> str:
@@ -2186,6 +2331,8 @@ async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: st
         except Exception:
             if saw_tool_result:
                 return await _synthesize_with_rescue_tool_evidence(working_messages, session_id)
+            if wants_public_web_context or wants_graph_wide_context:
+                return _required_tool_lookup_failed_response()
             return await run_openai_analysis(messages)
         choices = data.get("choices")
         first_choice = choices[0] if isinstance(choices, list) and choices else {}
@@ -2282,6 +2429,8 @@ async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: st
 
     if saw_tool_result:
         return await _synthesize_with_rescue_tool_evidence(working_messages, session_id)
+    if wants_public_web_context or wants_graph_wide_context:
+        return _required_tool_lookup_failed_response()
     return await run_openai_analysis(messages)
 
 
@@ -2437,6 +2586,13 @@ def normalize_safe_route_area_risk_payload(payload: dict[str, Any], max_zones: i
             max_items=8,
             max_len=400,
         )
+        safe_evidence_urls: list[str] = []
+        for url in evidence_urls:
+            safe_url = _safe_http_url(url, 400)
+            if safe_url and safe_url not in safe_evidence_urls:
+                safe_evidence_urls.append(safe_url)
+        if not safe_evidence_urls:
+            continue
         zones.append({
             "label": label,
             "severity": severity,
@@ -2449,7 +2605,7 @@ def normalize_safe_route_area_risk_payload(payload: dict[str, Any], max_zones: i
             "display_color": display_color,
             "icon": _trim_text(raw_zone.get("icon"), 80) or "warning",
             "notes": _trim_text(raw_zone.get("notes"), 1200),
-            "evidence_urls": evidence_urls,
+            "evidence_urls": safe_evidence_urls,
         })
         if len(zones) >= max(1, min(int(max_zones or 8), 20)):
             break

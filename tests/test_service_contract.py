@@ -1,7 +1,10 @@
 import asyncio
 import json
 
+import pytest
+
 from lunar_agent import service as service_module
+from lunar_agent.models import ExplorerAgentRespondRequest, SafeRouteAreaRiskResearchRequest
 from lunar_agent.service import build_prompt_messages, normalize_model_response, normalize_response_payload
 
 
@@ -58,6 +61,12 @@ def test_normalize_response_payload_supports_camel_case_followups_and_rejects_in
     assert payload["reply"] == "I couldn't produce a structured answer for this query yet."
     assert payload["actions"] == [{"type": "clear_country_focus", "label": "Clear location focus"}]
     assert payload["followUps"] == ["Compare reports", "List sources"]
+
+
+def test_normalize_response_payload_accepts_answer_message_and_content_aliases():
+    assert normalize_model_response(json.dumps({"answer": "Answer alias."}))["reply"] == "Answer alias."
+    assert normalize_model_response(json.dumps({"message": "Message alias."}))["reply"] == "Message alias."
+    assert normalize_model_response(json.dumps({"content": "Content alias."}))["reply"] == "Content alias."
 
 
 def test_normalize_response_payload_unwraps_json_reply_text_and_embedded_controls():
@@ -478,6 +487,27 @@ def test_safe_http_url_rejects_internal_and_special_hosts():
     assert service_module._safe_http_url("https://example.test/report") == "https://example.test/report"
 
 
+def test_request_models_reject_oversized_context_and_evidence_payloads():
+    with pytest.raises(ValueError):
+        ExplorerAgentRespondRequest(
+            sessionId="session-1",
+            allowUiActions=False,
+            conversationHistory=[],
+            queryPreview="FOR doc IN reports RETURN doc",
+            queryContext={"blob": "x" * 25000},
+            querySummary={},
+            currentUserMessage="What matters?",
+        )
+
+    with pytest.raises(ValueError):
+        SafeRouteAreaRiskResearchRequest(
+            sessionId="session-1",
+            aoi={"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
+            evidence=[{"title": f"Evidence {index}", "url": "https://example.test"} for index in range(80)],
+            maxZones=8,
+        )
+
+
 def test_respond_filters_ordinary_ui_actions_when_ui_actions_disabled(monkeypatch):
     async def fake_tool_aware_analysis(messages, session_id=None):
         return json.dumps(
@@ -792,6 +822,30 @@ def test_tool_aware_analysis_refuses_broad_answer_without_backend_tools(monkeypa
     assert "tool session is not available" in payload["reply"]
 
 
+def test_tool_aware_analysis_refuses_broad_answer_when_tool_orchestration_fails(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
+
+    async def fail_chat_completion(*_args, **_kwargs):
+        raise RuntimeError("provider outage")
+
+    async def fail_openai_analysis(*_args, **_kwargs):  # pragma: no cover - regression guard
+        raise AssertionError("broad/current requests should not fall back to generic model answers after tool failure")
+
+    monkeypatch.setattr(service_module, "_chat_completion_request", fail_chat_completion)
+    monkeypatch.setattr(service_module, "run_openai_analysis", fail_openai_analysis)
+
+    raw = asyncio.run(
+        service_module.run_tool_aware_analysis(
+            [{"role": "user", "content": "What's happening in South Africa today?"}],
+            "session-1",
+        )
+    )
+    payload = json.loads(raw)
+
+    assert payload["actions"] == []
+    assert "could not complete the required Intelligence Graph/web lookup" in payload["reply"]
+
+
 def test_execute_public_web_search_tool_normalizes_web_research(monkeypatch):
     monkeypatch.setattr(service_module.settings, "web_research_enabled", True)
     monkeypatch.setattr(service_module.settings, "model", "gpt-5")
@@ -832,6 +886,72 @@ def test_execute_public_web_search_tool_normalizes_web_research(monkeypatch):
     assert captured["kwargs"]["model"] == "gpt-5"
     assert captured["kwargs"]["context_size"] == service_module.settings.web_search_context_size
     assert "what is happening in South Africa" in captured["prompt"]
+
+
+def test_run_graph_read_query_rejects_write_aql_before_backend(monkeypatch):
+    async def fail_backend_call(*_args, **_kwargs):  # pragma: no cover - regression guard
+        raise AssertionError("unsafe write AQL should not reach the backend")
+
+    monkeypatch.setattr(service_module, "_call_backend_tool", fail_backend_call)
+
+    result = asyncio.run(
+        service_module._execute_tool_call(
+            "run_graph_read_query",
+            {"query": "FOR doc IN nodes_vertex_collection REMOVE doc IN nodes_vertex_collection RETURN OLD"},
+            session_id="session-1",
+        )
+    )
+
+    assert result["tool"] == "run_graph_read_query"
+    assert result["status"] == "error"
+    assert "read-only" in result["error"]
+
+
+def test_public_web_research_preserves_response_annotation_sources(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "openai_api_key", "test-key")
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+        content = b"{}"
+
+        def json(self):
+            return {
+                "output_text": json.dumps({"summary": "Public reporting adds context.", "findings": [], "sources": []}),
+                "output": [
+                    {
+                        "content": [
+                            {
+                                "text": {
+                                    "value": "Public reporting adds context.",
+                                    "annotations": [
+                                        {
+                                            "type": "url_citation",
+                                            "title": "Official update",
+                                            "url": "https://example.test/official-update",
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    }
+                ],
+            }
+
+    async def fake_post_responses_request(_client, *, headers, payload):
+        assert headers["Authorization"] == "Bearer test-key"
+        assert payload["tools"]
+        return FakeResponse()
+
+    monkeypatch.setattr(service_module, "_post_responses_request", fake_post_responses_request)
+
+    raw = asyncio.run(service_module.run_openai_web_research("Find current public context."))
+    payload = service_module.normalize_public_web_search_payload(json.loads(raw), query="South Africa")
+
+    assert payload["sources"] == [
+        {"title": "Official update", "url": "https://example.test/official-update"}
+    ]
+    assert service_module._public_web_payload_has_evidence({**payload, "status": "success"}) is True
 
 
 def test_tool_aware_analysis_requires_web_after_graph_for_current_public_context(monkeypatch):
@@ -1385,6 +1505,7 @@ def test_area_risk_payload_normalization_tolerates_malformed_numeric_fields():
                     "lat": "not-a-lat",
                     "lng": "18.6732",
                     "radius_m": "wide",
+                    "evidence_urls": ["https://example.test/khayelitsha"],
                     "coordinates": [
                         {"lat": "-33.0392", "lng": "18.6732"},
                         {"lat": "outside", "lng": "18.7"},
@@ -1396,6 +1517,7 @@ def test_area_risk_payload_normalization_tolerates_malformed_numeric_fields():
                     "lat": "-33.989",
                     "lon": "18.559",
                     "radiusM": "1250",
+                    "evidenceUrls": ["https://example.test/manenberg"],
                 },
             ],
             "notes": "Normalized model result.",
@@ -1429,6 +1551,30 @@ def test_area_risk_payload_normalization_accepts_title_as_label():
     )
 
     assert payload["zones"][0]["label"] == "Nyanga"
+
+
+def test_area_risk_payload_normalization_drops_sourceless_and_unsafe_url_zones():
+    payload = service_module.normalize_safe_route_area_risk_payload(
+        {
+            "zones": [
+                {"label": "Sourceless", "risk_score": 70},
+                {
+                    "label": "Unsafe URL",
+                    "risk_score": 72,
+                    "evidence_urls": ["http://169.254.169.254/latest"],
+                },
+                {
+                    "label": "Source backed",
+                    "risk_score": 74,
+                    "evidence_urls": ["https://example.test/source-backed", "http://localhost/admin"],
+                },
+            ]
+        },
+        max_zones=5,
+    )
+
+    assert [zone["label"] for zone in payload["zones"]] == ["Source backed"]
+    assert payload["zones"][0]["evidence_urls"] == ["https://example.test/source-backed"]
 
 
 def test_area_risk_evidence_fallback_extracts_source_backed_localities():
