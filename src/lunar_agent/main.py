@@ -1,4 +1,5 @@
 import logging
+import secrets
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 
@@ -23,20 +24,34 @@ def raise_internal_server_error(exc: Exception, public_detail: str) -> None:
 def require_token(authorization: str | None = Header(default=None)) -> None:
     expected = str(settings.shared_token or "").strip()
     if not expected:
-        return
+        logger.error("LUNAR_AGENT_SHARED_TOKEN is not configured")
+        raise HTTPException(status_code=503, detail="Agent authentication is unavailable")
 
     provided = str(authorization or "").strip()
-    if provided == f"Bearer {expected}":
+    scheme, separator, credential = provided.partition(" ")
+    if (
+        separator
+        and scheme.casefold() == "bearer"
+        and credential
+        and secrets.compare_digest(credential.encode("utf-8"), expected.encode("utf-8"))
+    ):
         return
-    raise HTTPException(status_code=401, detail="Unauthorized")
+    raise HTTPException(
+        status_code=401,
+        detail="Unauthorized",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 @app.get("/health")
 async def health() -> dict:
+    if not str(settings.shared_token or "").strip():
+        raise HTTPException(status_code=503, detail="Agent authentication is unavailable")
     return {
         "status": "ok",
         "service": settings.project_name,
         "model": settings.model,
+        "authConfigured": True,
     }
 
 
