@@ -2466,6 +2466,8 @@ def build_safe_route_area_risk_evidence_prompt(
             "Do not include an area solely because it is poor, informal, high-density, lacks services, has sanitation issues, or is socially vulnerable.",
             "Each zone must include evidence_urls from supplied evidence or current public web sources.",
             "Prefer smaller locality-level centers with radius_m around 500-2500m. Use larger radii only for a named township/locality with a genuinely broad footprint.",
+            "Return each real-world locality once. Do not emit synonymous, nested, or overlapping broad-and-small versions of the same place.",
+            "Before returning, compare all proposed zones and keep the best-supported boundary when two zones describe the same locality.",
             "If you cannot identify specific named areas, return zones=[].",
             "If evidence is insufficient, return zones=[].",
             "Never include tenant IDs, route details, usernames, or operational/security-sensitive information.",
@@ -2524,6 +2526,7 @@ def build_safe_route_area_risk_web_prompt(
             "Include public source URLs for every zone.",
             "Use approximate public-safety mapping only. Do not include tactical attack guidance or operational advice.",
             "If the evidence supports a larger named township, use its approximate center and a radius that covers the township, not the whole AOI.",
+            "Return each real-world locality once and remove synonymous or nested overlapping duplicates before responding.",
             "If you cannot identify named localities, return an empty zones array.",
         ],
         "mustNotDo": [
@@ -2532,6 +2535,7 @@ def build_safe_route_area_risk_web_prompt(
             "Do not include an area solely because it is poor, informal, high-density, lacks services, has sanitation issues, or is socially vulnerable.",
             "Do not mention tenant, route, convoy, client, user, or waypoint details.",
             "Do not invent precise boundaries when only public article-level evidence exists.",
+            "Do not return a small hotspot centered inside a larger zone with the same or substantially similar name unless the evidence clearly establishes a separate risk type and place.",
         ],
         "responseShape": {
             "zones": [
@@ -2593,7 +2597,7 @@ def normalize_safe_route_area_risk_payload(payload: dict[str, Any], max_zones: i
                 safe_evidence_urls.append(safe_url)
         if not safe_evidence_urls:
             continue
-        zones.append({
+        normalized_zone = {
             "label": label,
             "severity": severity,
             "risk_score": _coerce_bounded_int(raw_zone.get("risk_score") or raw_zone.get("riskScore"), 45, 0, 100),
@@ -2606,7 +2610,20 @@ def normalize_safe_route_area_risk_payload(payload: dict[str, Any], max_zones: i
             "icon": _trim_text(raw_zone.get("icon"), 80) or "warning",
             "notes": _trim_text(raw_zone.get("notes"), 1200),
             "evidence_urls": safe_evidence_urls,
-        })
+        }
+        duplicate_index = next(
+            (
+                index
+                for index, existing in enumerate(zones)
+                if _is_duplicate_normalized_area_risk_zone(normalized_zone, existing)
+            ),
+            None,
+        )
+        if duplicate_index is not None:
+            if _normalized_area_risk_zone_quality(normalized_zone) > _normalized_area_risk_zone_quality(zones[duplicate_index]):
+                zones[duplicate_index] = normalized_zone
+            continue
+        zones.append(normalized_zone)
         if len(zones) >= max(1, min(int(max_zones or 8), 20)):
             break
 
@@ -2614,6 +2631,48 @@ def normalize_safe_route_area_risk_payload(payload: dict[str, Any], max_zones: i
         "zones": zones,
         "notes": _trim_text(payload.get("notes") if isinstance(payload, dict) else None, 600),
     }
+
+
+def _is_duplicate_normalized_area_risk_zone(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    def normalized_label(value: Any) -> str:
+        return " ".join(
+            word
+            for word in re.findall(r"[a-z0-9]+", str(value or "").casefold())
+            if word not in {"area", "risk", "risks", "zone", "zones", "region", "district"}
+        )
+
+    left_label = normalized_label(left.get("label"))
+    right_label = normalized_label(right.get("label"))
+    if not left_label or not right_label:
+        return False
+    left_tokens = set(left_label.split())
+    right_tokens = set(right_label.split())
+    if left_label != right_label:
+        token_score = len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
+        if token_score < 0.72:
+            return False
+
+    values = [left.get("lat"), left.get("lon"), right.get("lat"), right.get("lon")]
+    if any(value is None for value in values):
+        return left_label == right_label
+    lat_a, lon_a, lat_b, lon_b = (float(value) for value in values)
+    lat1 = math.radians(lat_a)
+    lat2 = math.radians(lat_b)
+    delta_lat = math.radians(lat_b - lat_a)
+    delta_lon = math.radians(lon_b - lon_a)
+    hav = math.sin(delta_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    distance_km = 6371.0 * 2.0 * math.atan2(math.sqrt(hav), math.sqrt(max(0.0, 1.0 - hav)))
+    left_radius = max(0.05, float(left.get("radius_m") or 900) / 1000.0)
+    right_radius = max(0.05, float(right.get("radius_m") or 900) / 1000.0)
+    return distance_km <= (left_radius + right_radius) * 1.05
+
+
+def _normalized_area_risk_zone_quality(zone: Dict[str, Any]) -> tuple[int, int, int, int]:
+    evidence_count = len(zone.get("evidence_urls") or [])
+    coordinates_count = len(zone.get("coordinates") or [])
+    notes_length = len(str(zone.get("notes") or "").strip())
+    radius_m = int(float(zone.get("radius_m") or 100000))
+    return evidence_count, int(coordinates_count >= 3), notes_length, -radius_m
 
 
 async def research_safe_route_area_risk(

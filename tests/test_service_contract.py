@@ -1536,6 +1536,46 @@ def test_area_risk_payload_normalization_tolerates_malformed_numeric_fields():
     assert payload["zones"][1]["radius_m"] == 1250.0
 
 
+def test_area_risk_payload_normalization_removes_semantic_spatial_duplicates_only():
+    payload = service_module.normalize_safe_route_area_risk_payload(
+        {
+            "zones": [
+                {
+                    "label": "Central Station robbery hotspot",
+                    "lat": -33.925,
+                    "lon": 18.424,
+                        "radius_m": 1400,
+                        "severity": "high",
+                        "evidence_urls": ["https://example.test/original"],
+                },
+                {
+                    "label": "Central Station robbery hotspot zone",
+                    "lat": -33.9255,
+                    "lon": 18.4245,
+                    "radius_m": 300,
+                    "severity": "high",
+                    "notes": "More specific boundary supported by two public reports.",
+                    "evidence_urls": ["https://example.test/one", "https://example.test/two"],
+                },
+                {
+                    "label": "Flood-prone underpass",
+                    "lat": -33.925,
+                    "lon": 18.424,
+                        "radius_m": 1400,
+                        "severity": "high",
+                        "evidence_urls": ["https://example.test/flood"],
+                },
+            ]
+        },
+        max_zones=8,
+    )
+
+    assert [zone["label"] for zone in payload["zones"]] == [
+        "Central Station robbery hotspot zone",
+        "Flood-prone underpass",
+    ]
+
+
 def test_area_risk_payload_normalization_accepts_title_as_label():
     payload = service_module.normalize_safe_route_area_risk_payload(
         {
