@@ -83,8 +83,8 @@ def _bounded_tool_result_content(result: dict[str, Any]) -> str:
     if len(content) <= limit:
         return content
     trimmed = {
-        "tool": result.get("tool") if isinstance(result, dict) else None,
-        "status": result.get("status") if isinstance(result, dict) else "truncated",
+        "tool": result.get("tool"),
+        "status": result.get("status"),
         "truncated": True,
         "summary": _trim_text(result.get("summary") or result.get("answer") or result, max(800, limit - 500)),
     }
