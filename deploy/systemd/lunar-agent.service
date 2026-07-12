@@ -41,6 +41,11 @@ ExecStart=/usr/bin/docker run --rm \
   --publish 127.0.0.1:8310:8310 \
   --publish 172.17.0.1:8310:8310 \
   --security-opt no-new-privileges \
+  --cap-drop ALL \
+  --read-only \
+  --memory 768m \
+  --cpus 2 \
+  --pids-limit 128 \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   lunar-agent:latest
 ExecStop=/usr/bin/docker stop lunar-agent

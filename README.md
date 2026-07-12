@@ -19,7 +19,11 @@ This keeps auth and graph access in the backend while still letting the agent do
 
 ### `GET /health`
 
-Returns service health and the configured model. It returns `503` if shared-token authentication is not configured.
+Returns readiness and the configured model. It returns `503` when authentication, OpenAI, or backend tool configuration is incomplete.
+
+### `GET /live`
+
+Lightweight process liveness endpoint used by the container health check.
 
 ### `POST /v1/explorer-agent/respond`
 
@@ -58,17 +62,22 @@ Required:
 
 Optional:
 
-- `LUNAR_AGENT_MODEL`
+- `LUNAR_AGENT_MODEL` (default `gpt-5.1`)
 - `LUNAR_AGENT_HTTP_TIMEOUT`
 - `LUNAR_AGENT_WEB_RESEARCH_ENABLED` (default `true`)
 - `LUNAR_AGENT_WEB_SEARCH_CONTEXT_SIZE` (default `medium`)
 - `LUNAR_AGENT_WEB_REASONING_EFFORT` (default `low`)
 - `LUNAR_AGENT_WEB_MAX_OUTPUT_TOKENS` (default `1000`)
+- `LUNAR_AGENT_TOTAL_TURN_TIMEOUT` (default `125`; hard end-to-end turn deadline)
+- `LUNAR_AGENT_MAX_PARALLEL_TOOL_CALLS` (default `3`)
+- `LUNAR_AGENT_MAX_CONCURRENT_REQUESTS` (default `8`)
+- `LUNAR_AGENT_QUOTA_REQUESTS_PER_HOUR` (default `60` per quota key)
+- `LUNAR_AGENT_QUOTA_REQUESTS_PER_DAY` (default `300` per quota key)
 - `LUNAR_AGENT_SHARED_TOKEN` (required; the service fails closed without it)
 - `LUNAR_AGENT_BACKEND_BASE_URL`
 - `LUNAR_AGENT_BACKEND_SHARED_TOKEN`
 - `LUNAR_AGENT_BACKEND_HTTP_TIMEOUT`
-- `LUNAR_AGENT_AREA_RISK_MODEL` (default `gpt-5`)
+- `LUNAR_AGENT_AREA_RISK_MODEL` (default `gpt-5.1`)
 - `LUNAR_AGENT_AREA_RISK_SEARCH_CONTEXT_SIZE` (default `medium`)
 - `LUNAR_AGENT_AREA_RISK_MAX_OUTPUT_TOKENS` (default `700`)
 - `LUNAR_AGENT_AREA_RISK_MAX_EVIDENCE_ITEMS` (default `12`)

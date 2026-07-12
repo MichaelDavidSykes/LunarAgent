@@ -293,6 +293,47 @@ def test_tool_aware_analysis_synthesizes_response_after_tool_use_without_final_t
     assert payload["actions"][0]["type"] == "apply_graph_query_scope"
 
 
+def test_tool_calls_run_with_bounded_parallelism(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
+    monkeypatch.setattr(service_module.settings, "max_parallel_tool_calls", 3)
+    chat_calls = 0
+    active = 0
+    max_active = 0
+
+    async def fake_chat_completion(messages, tools=None, *, model=None):
+        nonlocal chat_calls
+        chat_calls += 1
+        if chat_calls == 1:
+            return {"choices": [{"message": {"content": "", "tool_calls": [
+                {
+                    "id": f"scope-{index}",
+                    "type": "function",
+                    "function": {"name": "list_scope_reports", "arguments": '{"limit":1}'},
+                }
+                for index in range(3)
+            ]}}]}
+        return {"choices": [{"message": {"content": '{"reply":"done","actions":[],"follow_ups":[]}'}}]}
+
+    async def fake_execute_tool(*_args):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return {"reports": [{"name": "Scoped report"}]}
+
+    monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
+    monkeypatch.setattr(service_module, "_execute_tool_call", fake_execute_tool)
+
+    result = asyncio.run(service_module.run_tool_aware_analysis(
+        [{"role": "user", "content": "What does the current scope say?"}],
+        "session-1",
+    ))
+
+    assert json.loads(result)["reply"] == "done"
+    assert max_active == 3
+
+
 def test_tool_aware_analysis_rescues_schema_only_tool_turn(monkeypatch):
     monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
 
@@ -499,6 +540,41 @@ def test_request_models_reject_oversized_context_and_evidence_payloads():
             currentUserMessage="What matters?",
         )
 
+
+def test_safe_route_request_strips_sensitive_aoi_metadata():
+    request = SafeRouteAreaRiskResearchRequest(
+        sessionId="internal-session",
+        aoi={
+            "bounds": {"minLat": -34.2, "minLon": 18.2, "maxLat": -33.5, "maxLon": 19.0},
+            "center": {"lat": -33.9, "lon": 18.6},
+            "countryHints": ["South Africa"],
+            "tenantId": "tenant-secret",
+            "clientId": "client-secret",
+            "route": {"waypoints": ["protected"]},
+            "labelContext": {
+                "place": "Cape Town",
+                "queryPreview": "Public safety watch",
+                "userEmail": "private@example.test",
+            },
+        },
+        evidence=[],
+    )
+
+    serialized = json.dumps(request.aoi)
+    assert "tenant-secret" not in serialized
+    assert "client-secret" not in serialized
+    assert "protected" not in serialized
+    assert "private@example.test" not in serialized
+    assert request.aoi["labelContext"]["place"] == "Cape Town"
+
+    prompt = service_module.build_safe_route_area_risk_web_prompt(
+        session_id=request.sessionId,
+        aoi=request.aoi,
+        evidence=[],
+        max_zones=3,
+    )
+    assert "internal-session" not in prompt
+
     with pytest.raises(ValueError):
         SafeRouteAreaRiskResearchRequest(
             sessionId="session-1",
@@ -506,6 +582,29 @@ def test_request_models_reject_oversized_context_and_evidence_payloads():
             evidence=[{"title": f"Evidence {index}", "url": "https://example.test"} for index in range(80)],
             maxZones=8,
         )
+
+
+def test_explorer_request_strips_private_tenant_context_before_prompting():
+    request = ExplorerAgentRespondRequest(
+        sessionId="session-1",
+        conversationHistory=[],
+        queryPreview="Current scope",
+        queryContext={
+            "clientId": "client-secret",
+            "clientName": "Sensitive Client",
+            "selectedCountry": "South Africa",
+            "nested": {"userEmail": "analyst@example.test", "moduleScope": ["situational"]},
+        },
+        querySummary={},
+        currentUserMessage="What is happening?",
+    )
+
+    serialized = json.dumps(request.queryContext)
+    assert "client-secret" not in serialized
+    assert "Sensitive Client" not in serialized
+    assert "analyst@example.test" not in serialized
+    assert request.queryContext["selectedCountry"] == "South Africa"
+    assert request.queryContext["nested"]["moduleScope"] == ["situational"]
 
 
 def test_respond_filters_ordinary_ui_actions_when_ui_actions_disabled(monkeypatch):
@@ -779,6 +878,7 @@ def test_public_web_error_or_disabled_payloads_are_not_evidence():
                     "summary": "Current public reporting adds context.",
                     "findings": [{"claim": "A public source reported an update.", "url": "https://example.test/update"}],
                     "sources": [],
+                    "verifiedSourceUrls": ["https://example.test/update"],
                 }
             ),
         }
@@ -800,6 +900,21 @@ def test_public_web_summary_without_sources_is_not_evidence():
     assert service_module._tool_payloads_have_public_web_evidence([
         {"role": "tool", "content": json.dumps({**payload, "status": "success"})}
     ]) is False
+
+
+def test_model_supplied_web_urls_without_search_annotations_are_rejected():
+    payload = service_module.normalize_public_web_search_payload(
+        {
+            "summary": "Model-only claim.",
+            "findings": [{"claim": "Invented finding", "url": "https://hallucinated.example/story"}],
+            "sources": [{"title": "Invented source", "url": "https://hallucinated.example/story"}],
+        },
+        query="test",
+    )
+
+    assert payload["findings"] == []
+    assert payload["sources"] == []
+    assert payload["verifiedSourceUrls"] == []
 
 
 def test_tool_aware_analysis_refuses_broad_answer_without_backend_tools(monkeypatch):
@@ -846,6 +961,70 @@ def test_tool_aware_analysis_refuses_broad_answer_when_tool_orchestration_fails(
     assert "could not complete the required Intelligence Graph/web lookup" in payload["reply"]
 
 
+def test_tool_aware_analysis_rejects_model_answer_when_graph_and_web_tools_both_fail(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
+    monkeypatch.setattr(service_module.settings, "web_research_enabled", True)
+    calls = 0
+
+    async def fake_chat_completion(messages, tools=None, *, model=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"choices": [{"message": {"content": "", "tool_calls": [{
+                "id": "graph", "type": "function",
+                "function": {"name": "search_intelligence_graph", "arguments": '{"query":"SA today"}'},
+            }]}}]}
+        if calls == 2:
+            return {"choices": [{"message": {"content": '{"reply":"premature","actions":[]}'}}]}
+        if calls == 3:
+            return {"choices": [{"message": {"content": "", "tool_calls": [{
+                "id": "web", "type": "function",
+                "function": {"name": "search_public_web", "arguments": '{"query":"SA today"}'},
+            }]}}]}
+        return {"choices": [{"message": {"content": '{"reply":"Ungrounded generic answer","actions":[]}'}}]}
+
+    async def failed_tool(tool_name, *_args):
+        return {"tool": tool_name, "status": "error", "error": "lookup unavailable"}
+
+    monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
+    monkeypatch.setattr(service_module, "_execute_tool_call", failed_tool)
+
+    payload = json.loads(asyncio.run(service_module.run_tool_aware_analysis(
+        [{"role": "user", "content": "What's happening in South Africa today?"}],
+        "session-1",
+    )))
+    assert "Ungrounded" not in payload["reply"]
+    assert "could not complete the required Intelligence Graph/web lookup" in payload["reply"]
+
+
+def test_tool_aware_analysis_rejects_ungrounded_current_scope_answer(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://api.example.test")
+    calls = 0
+
+    async def fake_chat_completion(messages, tools=None, *, model=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"choices": [{"message": {"content": "", "tool_calls": [{
+                "id": "scope", "type": "function",
+                "function": {"name": "list_scope_reports", "arguments": "{}"},
+            }]}}]}
+        return {"choices": [{"message": {"content": '{"reply":"Generic scope answer","actions":[]}'}}]}
+
+    async def failed_scope_tool(*_args):
+        return {"tool": "list_scope_reports", "status": "error", "error": "scope unavailable"}
+
+    monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
+    monkeypatch.setattr(service_module, "_execute_tool_call", failed_scope_tool)
+
+    payload = json.loads(asyncio.run(service_module.run_tool_aware_analysis(
+        [{"role": "user", "content": "What does the current scope say?"}],
+        "session-1",
+    )))
+    assert "Generic scope answer" not in payload["reply"]
+    assert "could not complete" in payload["reply"]
+
+
 def test_execute_public_web_search_tool_normalizes_web_research(monkeypatch):
     monkeypatch.setattr(service_module.settings, "web_research_enabled", True)
     monkeypatch.setattr(service_module.settings, "model", "gpt-5")
@@ -867,6 +1046,7 @@ def test_execute_public_web_search_tool_normalizes_web_research(monkeypatch):
                     }
                 ],
                 "sources": [{"title": "Johannesburg update", "url": "https://example.test/jhb"}],
+                "verifiedSourceUrls": ["https://example.test/jhb"],
             }
         )
 
@@ -905,6 +1085,36 @@ def test_run_graph_read_query_rejects_write_aql_before_backend(monkeypatch):
     assert result["tool"] == "run_graph_read_query"
     assert result["status"] == "error"
     assert "read-only" in result["error"]
+
+
+def test_backend_tool_errors_do_not_expose_response_body(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "backend_base_url", "https://backend.example.test")
+
+    class FakeResponse:
+        status_code = 500
+        text = "private tenant token=secret"
+        content = b"private tenant token=secret"
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(service_module.httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(RuntimeError) as error:
+        asyncio.run(service_module._call_backend_tool("/internal", {"session_id": "session-1"}))
+    assert "private tenant" not in str(error.value)
+    assert "token=secret" not in str(error.value)
+    assert "HTTP 500" in str(error.value)
 
 
 def test_public_web_research_preserves_response_annotation_sources(monkeypatch):
@@ -1038,6 +1248,7 @@ def test_tool_aware_analysis_requires_web_after_graph_for_current_public_context
             "summary": "Public web reporting adds current context.",
             "findings": [{"claim": "A current public development was reported.", "url": "https://example.test"}],
             "sources": [],
+            "verifiedSourceUrls": ["https://example.test"],
         }
 
     monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
@@ -1301,6 +1512,7 @@ def test_tool_aware_analysis_allows_web_after_attempted_empty_graph_search(monke
             "summary": "Public web reporting adds current context.",
             "findings": [{"claim": "A current public development was reported.", "url": "https://example.test"}],
             "sources": [],
+            "verifiedSourceUrls": ["https://example.test"],
         }
 
     monkeypatch.setattr(service_module, "_chat_completion_request", fake_chat_completion)
@@ -1615,6 +1827,48 @@ def test_area_risk_payload_normalization_drops_sourceless_and_unsafe_url_zones()
 
     assert [zone["label"] for zone in payload["zones"]] == ["Source backed"]
     assert payload["zones"][0]["evidence_urls"] == ["https://example.test/source-backed"]
+
+
+def test_area_risk_normalization_enforces_aoi_and_verified_sources():
+    payload = service_module.normalize_safe_route_area_risk_payload(
+        {
+            "zones": [
+                {
+                    "label": "Inside AOI",
+                    "lat": -33.9,
+                    "lon": 18.6,
+                    "radius_m": 1200,
+                    "evidence_urls": ["https://example.test/verified"],
+                },
+                {
+                    "label": "Outside AOI",
+                    "lat": 51.5,
+                    "lon": -0.1,
+                    "radius_m": 1200,
+                    "evidence_urls": ["https://example.test/verified"],
+                },
+                {
+                    "label": "Unverified source",
+                    "lat": -33.8,
+                    "lon": 18.7,
+                    "radius_m": 1200,
+                    "evidence_urls": ["https://hallucinated.example/story"],
+                },
+                {
+                    "label": "Oversized zone",
+                    "lat": -33.8,
+                    "lon": 18.7,
+                    "radius_m": 100000,
+                    "evidence_urls": ["https://example.test/verified"],
+                },
+            ]
+        },
+        max_zones=8,
+        aoi={"bounds": {"minLat": -34.2, "minLon": 18.2, "maxLat": -33.5, "maxLon": 19.0}},
+        verified_source_urls={"https://example.test/verified"},
+    )
+
+    assert [zone["label"] for zone in payload["zones"]] == ["Inside AOI"]
 
 
 def test_area_risk_evidence_fallback_extracts_source_backed_localities():

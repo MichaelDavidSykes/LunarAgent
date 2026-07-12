@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -260,6 +261,7 @@ def _merge_response_web_sources(raw_text: str, sources: list[dict[str, str]]) ->
                 "summary": _trim_text(raw_text, 2200),
                 "findings": [],
                 "sources": sources[:10],
+                "verifiedSourceUrls": [source["url"] for source in sources[:10] if source.get("url")],
             },
             ensure_ascii=False,
         )
@@ -283,6 +285,7 @@ def _merge_response_web_sources(raw_text: str, sources: list[dict[str, str]]) ->
             date=source.get("date"),
         )
     merged["sources"] = next_sources
+    merged["verifiedSourceUrls"] = [source["url"] for source in sources if source.get("url")]
     return json.dumps(merged, ensure_ascii=False)
 
 
@@ -579,7 +582,6 @@ def build_prompt_messages(
             "runtime": "lunar-agent",
             "mode": "interactive-intelligence-analysis",
         },
-        "sessionId": str(session_id or "").strip() or None,
         "currentDateUtc": datetime.now(timezone.utc).date().isoformat(),
         "allowUiActions": bool(allow_ui_actions),
         "allowedActions": ([
@@ -1083,9 +1085,15 @@ async def _synthesize_with_rescue_tool_evidence(
 
 def _tool_payloads_have_graph_evidence(messages: list[dict[str, Any]]) -> bool:
     for payload in _tool_result_payloads(messages):
-        if payload.get("explorerScope") or payload.get("reports") or payload.get("matches") or payload.get("report"):
+        if str(payload.get("status") or "success").strip().lower() in {"error", "failed", "unavailable"}:
+            continue
+        if isinstance(payload.get("reports"), list) and payload.get("reports"):
             return True
-        if "resultCount" in payload or "result" in payload:
+        if isinstance(payload.get("matches"), list) and payload.get("matches"):
+            return True
+        if isinstance(payload.get("report"), dict) and payload.get("report"):
+            return True
+        if int(payload.get("resultCount") or 0) > 0 and isinstance(payload.get("result"), list) and payload.get("result"):
             return True
     return False
 
@@ -1098,13 +1106,20 @@ def _public_web_payload_has_evidence(payload: dict[str, Any]) -> bool:
         return False
     findings = payload.get("findings")
     sources = payload.get("sources")
+    verified_urls = {
+        _safe_http_url(url, 500)
+        for url in (payload.get("verifiedSourceUrls") or [])
+        if _safe_http_url(url, 500)
+    }
+    if not verified_urls:
+        return False
     if isinstance(findings, list):
         for finding in findings:
-            if isinstance(finding, dict) and _safe_http_url(finding.get("url"), 500):
+            if isinstance(finding, dict) and _safe_http_url(finding.get("url"), 500) in verified_urls:
                 return True
     if isinstance(sources, list):
         for source in sources:
-            if isinstance(source, dict) and _safe_http_url(source.get("url"), 500):
+            if isinstance(source, dict) and _safe_http_url(source.get("url"), 500) in verified_urls:
                 return True
     return False
 
@@ -1808,6 +1823,11 @@ def build_public_web_search_prompt(
 
 
 def normalize_public_web_search_payload(payload: dict[str, Any], *, query: str) -> dict[str, Any]:
+    verified_urls = {
+        safe
+        for item in (payload.get("verifiedSourceUrls") or [])
+        if (safe := _safe_http_url(item, 500))
+    }
     findings: list[dict[str, str]] = []
     raw_findings = payload.get("findings") if isinstance(payload, dict) else []
     if not isinstance(raw_findings, list):
@@ -1817,7 +1837,7 @@ def normalize_public_web_search_payload(payload: dict[str, Any], *, query: str) 
             continue
         claim = _trim_text(item.get("claim") or item.get("finding") or item.get("summary"), 360)
         url = _safe_http_url(item.get("url"), 500)
-        if not claim or not url:
+        if not claim or not url or url not in verified_urls:
             continue
         finding = {
             "claim": claim,
@@ -1839,7 +1859,7 @@ def normalize_public_web_search_payload(payload: dict[str, Any], *, query: str) 
             continue
         url = _safe_http_url(item.get("url"), 500)
         title = _trim_text(item.get("title") or item.get("source") or item.get("publisher"), 180)
-        if not url:
+        if not url or url not in verified_urls:
             continue
         if url and url in seen_urls:
             continue
@@ -1863,6 +1883,7 @@ def normalize_public_web_search_payload(payload: dict[str, Any], *, query: str) 
         "summary": _trim_text(summary, 2200),
         "findings": findings,
         "sources": sources,
+        "verifiedSourceUrls": sorted(verified_urls),
     }
 
 
@@ -2021,8 +2042,47 @@ async def _call_backend_tool(path: str, payload: dict[str, Any]) -> dict[str, An
         response = await client.post(target, headers=_backend_headers(), json=payload)
 
     if response.status_code >= 400:
-        raise RuntimeError(f"Backend tool call failed with HTTP {response.status_code}: {response.text[:400]}")
+        logger.warning("Backend tool call %s failed with HTTP %s", path, response.status_code)
+        raise RuntimeError(f"Backend tool call failed with HTTP {response.status_code}")
     return response.json() if response.content else {}
+
+
+async def _emit_progress(session_id: str | None, phase: str, message: str) -> None:
+    if not (
+        str(session_id or "").strip()
+        and str(settings.backend_base_url or "").strip()
+        and str(settings.backend_shared_token or "").strip()
+    ):
+        return
+    target = f"{str(settings.backend_base_url).rstrip('/')}/api/v1/graph/ai-agent/tools/progress"
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            response = await client.post(
+                target,
+                headers=_backend_headers(),
+                json={
+                    "session_id": str(session_id).strip(),
+                    "phase": _trim_text(phase, 80),
+                    "message": _trim_text(message, 240),
+                },
+            )
+        if response.status_code >= 400:
+            logger.debug("Progress callback returned HTTP %s", response.status_code)
+    except Exception:
+        logger.debug("Progress callback failed", exc_info=True)
+
+
+def _tool_progress(tool_name: str) -> tuple[str, str]:
+    return {
+        "list_scope_reports": ("searching_scope", "Reviewing reports in the current Explorer scope"),
+        "search_scope_reports": ("searching_scope", "Searching reports in the current Explorer scope"),
+        "get_scope_report_detail": ("reading_report", "Reading a scoped intelligence report"),
+        "graph_schema_context": ("planning_graph_query", "Inspecting LunarGraph query guidance"),
+        "search_intelligence_graph": ("searching_graph", "Searching the wider Intelligence Graph"),
+        "run_graph_read_query": ("querying_graph", "Running a bounded read-only LunarGraph query"),
+        "get_graph_report_detail": ("reading_report", "Reading a graph-backed intelligence report"),
+        "search_public_web": ("searching_web", "Searching current public web evidence"),
+    }.get(tool_name, ("working", "Performing an intelligence lookup"))
 
 
 async def _execute_tool_call(name: str, arguments: dict[str, Any], session_id: str | None) -> dict[str, Any]:
@@ -2271,6 +2331,7 @@ async def run_openai_web_research(
                     "summary": "Public web research returned no extractable text for this query.",
                     "findings": [],
                     "sources": response_sources,
+                    "verifiedSourceUrls": [source["url"] for source in response_sources if source.get("url")],
                 })
             last_error = f"Responses API returned HTTP {response.status_code}: {response.text[:400]}"
     raise RuntimeError(last_error or "Responses API web research failed")
@@ -2305,7 +2366,7 @@ def _required_tool_lookup_failed_response() -> str:
     })
 
 
-async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: str | None) -> str:
+async def _run_tool_aware_analysis_inner(messages: list[dict[str, Any]], session_id: str | None) -> str:
     if not str(settings.backend_base_url or "").strip() or not str(session_id or "").strip():
         if _request_wants_public_web_context(messages) or _request_wants_graph_wide_context(messages):
             return json.dumps({
@@ -2359,9 +2420,12 @@ async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: st
             }
             working_messages.append(assistant_message)
 
-            for tool_call in bounded_tool_calls:
+            parallel_limit = max(1, min(int(settings.max_parallel_tool_calls or 3), 4))
+            semaphore = asyncio.Semaphore(parallel_limit)
+
+            async def execute_bounded_tool(tool_call: Any) -> tuple[str, dict[str, Any]] | None:
                 if not isinstance(tool_call, dict):
-                    continue
+                    return None
                 tool_id = str(tool_call.get("id") or "").strip()
                 function_data = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
                 tool_name = str(function_data.get("name") or "").strip()
@@ -2372,10 +2436,26 @@ async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: st
                     parsed_arguments = {}
 
                 try:
-                    result = await _execute_tool_call(tool_name, parsed_arguments if isinstance(parsed_arguments, dict) else {}, session_id)
-                except Exception as exc:
-                    result = {"error": str(exc)}
+                    phase, progress_message = _tool_progress(tool_name)
+                    await _emit_progress(session_id, phase, progress_message)
+                    async with semaphore:
+                        result = await _execute_tool_call(
+                            tool_name,
+                            parsed_arguments if isinstance(parsed_arguments, dict) else {},
+                            session_id,
+                        )
+                except Exception:
+                    logger.warning("LunarAgent tool %s failed", tool_name, exc_info=True)
+                    result = {"tool": tool_name, "status": "error", "error": "Tool execution failed."}
+                return tool_id, result
 
+            executed_results = await asyncio.gather(
+                *(execute_bounded_tool(tool_call) for tool_call in bounded_tool_calls)
+            )
+            for executed in executed_results:
+                if executed is None:
+                    continue
+                tool_id, result = executed
                 saw_tool_result = True
                 tool_call_count += 1
                 working_messages.append({
@@ -2425,6 +2505,18 @@ async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: st
                     ),
                 })
                 continue
+            if (
+                wants_graph_wide_context
+                and not _tool_payloads_have_graph_evidence(working_messages)
+                and not _tool_payloads_have_public_web_evidence(working_messages)
+            ):
+                return _required_tool_lookup_failed_response()
+            if (
+                _request_mentions_current_scope(_latest_user_request_text(working_messages))
+                and not _tool_payloads_have_graph_evidence(working_messages)
+            ):
+                return _required_tool_lookup_failed_response()
+            await _emit_progress(session_id, "synthesizing", "Synthesizing graph and public web evidence")
             return _trim_text(_sanitize_scope_actions_for_tool_evidence(content_text, working_messages), _reply_char_limit())
 
     if saw_tool_result:
@@ -2432,6 +2524,18 @@ async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: st
     if wants_public_web_context or wants_graph_wide_context:
         return _required_tool_lookup_failed_response()
     return await run_openai_analysis(messages)
+
+
+async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: str | None) -> str:
+    await _emit_progress(session_id, "planning", "Planning the intelligence evidence path")
+    timeout_seconds = max(30, min(int(settings.total_turn_timeout or 125), 140))
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            return await _run_tool_aware_analysis_inner(messages, session_id)
+    except TimeoutError:
+        logger.warning("LunarAgent turn exceeded %s seconds", timeout_seconds)
+        await _emit_progress(session_id, "failed", "Intelligence lookup timed out")
+        return _required_tool_lookup_failed_response()
 
 
 def build_safe_route_area_risk_evidence_prompt(
@@ -2455,7 +2559,6 @@ def build_safe_route_area_risk_evidence_prompt(
             "runtime": "lunar-agent",
             "mode": "sanitized-area-risk-research",
         },
-        "sessionId": str(session_id or "").strip() or None,
         "aoi": aoi,
         "evidence": _bounded_area_risk_evidence(evidence),
         "maxZones": bounded_max_zones,
@@ -2509,7 +2612,6 @@ def build_safe_route_area_risk_web_prompt(
             "runtime": "lunar-agent",
             "mode": "dynamic-public-area-risk-research",
         },
-        "sessionId": str(session_id or "").strip() or None,
         "aoi": aoi,
         "seedEvidence": _bounded_area_risk_evidence(evidence),
         "maxZones": bounded_max_zones,
@@ -2564,8 +2666,43 @@ def build_safe_route_area_risk_web_prompt(
     )
 
 
-def normalize_safe_route_area_risk_payload(payload: dict[str, Any], max_zones: int) -> dict[str, Any]:
+def _safe_route_aoi_bounds(aoi: dict[str, Any] | None) -> dict[str, float] | None:
+    raw = aoi.get("bounds") if isinstance(aoi, dict) and isinstance(aoi.get("bounds"), dict) else {}
+    bounds = {
+        "minLat": _coerce_bounded_float(raw.get("minLat"), -90, 90),
+        "minLon": _coerce_bounded_float(raw.get("minLon"), -180, 180),
+        "maxLat": _coerce_bounded_float(raw.get("maxLat"), -90, 90),
+        "maxLon": _coerce_bounded_float(raw.get("maxLon"), -180, 180),
+    }
+    if any(value is None for value in bounds.values()):
+        return None
+    typed = {key: float(value) for key, value in bounds.items() if value is not None}
+    if typed["minLat"] >= typed["maxLat"] or typed["minLon"] >= typed["maxLon"]:
+        return None
+    return typed
+
+
+def _point_in_safe_route_aoi(lat: float, lon: float, bounds: dict[str, float]) -> bool:
+    lat_padding = max(0.12, min(1.0, (bounds["maxLat"] - bounds["minLat"]) * 0.25))
+    lon_padding = max(0.12, min(1.0, (bounds["maxLon"] - bounds["minLon"]) * 0.25))
+    return (
+        bounds["minLat"] - lat_padding <= lat <= bounds["maxLat"] + lat_padding
+        and bounds["minLon"] - lon_padding <= lon <= bounds["maxLon"] + lon_padding
+    )
+
+
+def normalize_safe_route_area_risk_payload(
+    payload: dict[str, Any],
+    max_zones: int,
+    *,
+    aoi: dict[str, Any] | None = None,
+    verified_source_urls: set[str] | None = None,
+) -> dict[str, Any]:
     zones: list[dict[str, Any]] = []
+    aoi_bounds = _safe_route_aoi_bounds(aoi)
+    verified_urls = {
+        safe for item in (verified_source_urls or set()) if (safe := _safe_http_url(item, 500))
+    }
     raw_zones = payload.get("zones") if isinstance(payload, dict) else []
     if not isinstance(raw_zones, list):
         raw_zones = []
@@ -2593,19 +2730,44 @@ def normalize_safe_route_area_risk_payload(payload: dict[str, Any], max_zones: i
         safe_evidence_urls: list[str] = []
         for url in evidence_urls:
             safe_url = _safe_http_url(url, 400)
-            if safe_url and safe_url not in safe_evidence_urls:
+            if safe_url and (verified_source_urls is None or safe_url in verified_urls) and safe_url not in safe_evidence_urls:
                 safe_evidence_urls.append(safe_url)
         if not safe_evidence_urls:
             continue
+        lat = _coerce_bounded_float(raw_zone.get("lat"), -90, 90)
+        lon = _coerce_bounded_float(raw_zone.get("lon") if raw_zone.get("lon") is not None else raw_zone.get("lng"), -180, 180)
+        coordinates = _normalize_area_risk_coordinates(raw_zone.get("coordinates"))
+        if (lat is None) != (lon is None):
+            if aoi_bounds:
+                continue
+        if lat is None and lon is None and len(coordinates) >= 3:
+            lat = sum(point["lat"] for point in coordinates) / len(coordinates)
+            lon = sum(point["lon"] for point in coordinates) / len(coordinates)
+        if aoi_bounds:
+            if lat is None or lon is None or not _point_in_safe_route_aoi(lat, lon, aoi_bounds):
+                continue
+            if coordinates and (
+                len(coordinates) < 3
+                or any(not _point_in_safe_route_aoi(point["lat"], point["lon"], aoi_bounds) for point in coordinates)
+            ):
+                coordinates = []
+        radius = _coerce_bounded_float(
+            raw_zone.get("radius_m") or raw_zone.get("radiusM") or (1200 if aoi_bounds else None),
+            200 if aoi_bounds else 0,
+            15000 if aoi_bounds else 100000,
+        )
+        if aoi_bounds and radius is None:
+            continue
+
         normalized_zone = {
             "label": label,
             "severity": severity,
             "risk_score": _coerce_bounded_int(raw_zone.get("risk_score") or raw_zone.get("riskScore"), 45, 0, 100),
             "confidence": confidence,
-            "lat": _coerce_bounded_float(raw_zone.get("lat"), -90, 90),
-            "lon": _coerce_bounded_float(raw_zone.get("lon") if raw_zone.get("lon") is not None else raw_zone.get("lng"), -180, 180),
-            "radius_m": _coerce_bounded_float(raw_zone.get("radius_m") or raw_zone.get("radiusM"), 0, 100000),
-            "coordinates": _normalize_area_risk_coordinates(raw_zone.get("coordinates")),
+            "lat": lat,
+            "lon": lon,
+            "radius_m": radius,
+            "coordinates": coordinates,
             "display_color": display_color,
             "icon": _trim_text(raw_zone.get("icon"), 80) or "warning",
             "notes": _trim_text(raw_zone.get("notes"), 1200),
@@ -2683,6 +2845,11 @@ async def research_safe_route_area_risk(
     max_zones: int = 8,
 ) -> dict[str, Any]:
     bounded_max_zones = _bounded_area_risk_max_zones(max_zones)
+    seed_evidence_urls = {
+        safe
+        for item in _bounded_area_risk_evidence(evidence)
+        if (safe := _safe_http_url(item.get("url"), 500))
+    }
     if settings.area_risk_web_research_enabled:
         web_prompt = build_safe_route_area_risk_web_prompt(
             session_id=session_id,
@@ -2693,7 +2860,17 @@ async def research_safe_route_area_risk(
         try:
             raw_answer = await run_openai_web_research(web_prompt, model=settings.area_risk_model)
             parsed = _safe_parse_json_object(raw_answer) or {"zones": []}
-            normalized = normalize_safe_route_area_risk_payload(parsed, max_zones=bounded_max_zones)
+            verified_web_urls = {
+                safe
+                for item in (parsed.get("verifiedSourceUrls") or [])
+                if (safe := _safe_http_url(item, 500))
+            }
+            normalized = normalize_safe_route_area_risk_payload(
+                parsed,
+                max_zones=bounded_max_zones,
+                aoi=aoi,
+                verified_source_urls=verified_web_urls | seed_evidence_urls,
+            )
             normalized["model"] = settings.area_risk_model
             normalized["notes"] = normalized.get("notes") or "Dynamic public web research completed."
             if normalized.get("zones"):
@@ -2727,10 +2904,13 @@ async def research_safe_route_area_risk(
         normalized_fallback = normalize_safe_route_area_risk_payload(
             {"zones": fallback_candidates},
             max_zones=bounded_max_zones,
+            aoi=aoi,
+            verified_source_urls=seed_evidence_urls,
         )
-        normalized_fallback["model"] = settings.area_risk_model
-        normalized_fallback["notes"] = "Used bounded public evidence fallback for named locality candidates."
-        return normalized_fallback
+        if normalized_fallback.get("zones"):
+            normalized_fallback["model"] = settings.area_risk_model
+            normalized_fallback["notes"] = "Used bounded public evidence fallback for named locality candidates."
+            return normalized_fallback
 
     try:
         evidence_prompt = build_safe_route_area_risk_evidence_prompt(
@@ -2741,7 +2921,12 @@ async def research_safe_route_area_risk(
         )
         raw_answer = await run_openai_responses_analysis(evidence_prompt, model=settings.area_risk_model)
         parsed = _safe_parse_json_object(raw_answer) or {"zones": []}
-        normalized = normalize_safe_route_area_risk_payload(parsed, max_zones=bounded_max_zones)
+        normalized = normalize_safe_route_area_risk_payload(
+            parsed,
+            max_zones=bounded_max_zones,
+            aoi=aoi,
+            verified_source_urls=seed_evidence_urls,
+        )
     except Exception as exc:
         logger.warning("Area-risk evidence analysis failed; using deterministic evidence fallback: %s", exc)
         normalized = {"zones": [], "notes": ""}
@@ -2758,7 +2943,9 @@ async def respond(
     summary: dict[str, Any],
     context: dict[str, Any],
     user_message: str,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
+    del request_id  # Idempotency is enforced by LunarSurfaceBackend; never send this identifier to the model.
     messages = build_prompt_messages(
         session_id=session_id,
         allow_ui_actions=allow_ui_actions,

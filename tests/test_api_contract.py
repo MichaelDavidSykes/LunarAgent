@@ -61,7 +61,7 @@ def test_area_risk_endpoint_hides_internal_error_detail(monkeypatch):
 
 def test_threatscape_query_risk_alias_uses_area_risk_research(monkeypatch):
     async def fake_research_safe_route_area_risk(**kwargs):
-        assert kwargs["session_id"] == "session-1"
+        assert kwargs["session_id"] is None
         return {"zones": [{"label": "Johannesburg"}], "model": "test-model", "notes": "ok"}
 
     monkeypatch.setattr(main_module, "research_safe_route_area_risk", fake_research_safe_route_area_risk)
@@ -131,7 +131,21 @@ def test_agent_rejects_invalid_bearer_token(monkeypatch):
 
 def test_health_reports_authentication_is_configured(monkeypatch):
     monkeypatch.setattr(main_module.settings, "shared_token", "configured-secret")
+    monkeypatch.setattr(main_module.settings, "openai_api_key", "configured-openai-key")
+    monkeypatch.setattr(main_module.settings, "backend_base_url", "https://backend.example.test")
+    monkeypatch.setattr(main_module.settings, "backend_shared_token", "configured-backend-token")
     response = TestClient(main_module.app).get("/health")
 
     assert response.status_code == 200
     assert response.json()["authConfigured"] is True
+    assert response.json()["dependenciesConfigured"] is True
+
+
+def test_health_fails_when_runtime_dependencies_are_missing(monkeypatch):
+    monkeypatch.setattr(main_module.settings, "shared_token", "configured-secret")
+    monkeypatch.setattr(main_module.settings, "openai_api_key", "")
+    monkeypatch.setattr(main_module.settings, "backend_base_url", "")
+    monkeypatch.setattr(main_module.settings, "backend_shared_token", "")
+
+    assert TestClient(main_module.app).get("/health").status_code == 503
+    assert TestClient(main_module.app).get("/live").status_code == 200
