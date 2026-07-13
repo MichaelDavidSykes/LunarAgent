@@ -2794,7 +2794,7 @@ def normalize_safe_route_area_risk_payload(
     }
 
 
-def _is_duplicate_normalized_area_risk_zone(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+def _is_duplicate_normalized_area_risk_zone(left: dict[str, Any], right: dict[str, Any]) -> bool:
     def normalized_label(value: Any) -> str:
         return " ".join(
             word
@@ -2806,9 +2806,9 @@ def _is_duplicate_normalized_area_risk_zone(left: Dict[str, Any], right: Dict[st
     right_label = normalized_label(right.get("label"))
     if not left_label or not right_label:
         return False
-    left_tokens = set(left_label.split())
-    right_tokens = set(right_label.split())
     if left_label != right_label:
+        left_tokens = set(left_label.split())
+        right_tokens = set(right_label.split())
         token_score = len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
         if token_score < 0.72:
             return False
@@ -2828,7 +2828,7 @@ def _is_duplicate_normalized_area_risk_zone(left: Dict[str, Any], right: Dict[st
     return distance_km <= (left_radius + right_radius) * 1.05
 
 
-def _normalized_area_risk_zone_quality(zone: Dict[str, Any]) -> tuple[int, int, int, int]:
+def _normalized_area_risk_zone_quality(zone: dict[str, Any]) -> tuple[int, int, int, int]:
     evidence_count = len(zone.get("evidence_urls") or [])
     coordinates_count = len(zone.get("coordinates") or [])
     notes_length = len(str(zone.get("notes") or "").strip())
