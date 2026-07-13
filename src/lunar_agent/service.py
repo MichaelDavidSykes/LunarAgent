@@ -2737,9 +2737,8 @@ def normalize_safe_route_area_risk_payload(
         lat = _coerce_bounded_float(raw_zone.get("lat"), -90, 90)
         lon = _coerce_bounded_float(raw_zone.get("lon") if raw_zone.get("lon") is not None else raw_zone.get("lng"), -180, 180)
         coordinates = _normalize_area_risk_coordinates(raw_zone.get("coordinates"))
-        if (lat is None) != (lon is None):
-            if aoi_bounds:
-                continue
+        if (lat is None) != (lon is None) and aoi_bounds:
+            continue
         if lat is None and lon is None and len(coordinates) >= 3:
             lat = sum(point["lat"] for point in coordinates) / len(coordinates)
             lon = sum(point["lon"] for point in coordinates) / len(coordinates)
