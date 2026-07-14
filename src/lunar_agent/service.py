@@ -132,10 +132,7 @@ def _extract_wrapped_reply_payload(value: Any) -> dict[str, Any] | None:
         return None
 
     parsed = _safe_parse_json_object(text)
-    if not isinstance(parsed, dict):
-        return None
-
-    return parsed if any(key in parsed for key in ("reply", "answer", "message", "content")) else None
+    return parsed if parsed and any(key in parsed for key in ("reply", "answer", "message", "content")) else None
 
 
 def _normalize_reply_text(value: Any, max_len: int = 12000) -> str:
