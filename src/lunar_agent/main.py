@@ -113,7 +113,18 @@ async def explorer_agent_respond(request: ExplorerAgentRespondRequest) -> Explor
         raise_internal_server_error(exc, "Explorer agent response failed.")
 
 
-@app.post("/v1/safe-route/area-risk/research", response_model=SafeRouteAreaRiskResearchResponse, dependencies=[Depends(require_token)])
+@app.post(
+    "/v1/threatscape/query-risk/research",
+    response_model=SafeRouteAreaRiskResearchResponse,
+    dependencies=[Depends(require_token)],
+    name="threatscape_query_risk_research",
+)
+@app.post(
+    "/v1/safe-route/area-risk/research",
+    response_model=SafeRouteAreaRiskResearchResponse,
+    dependencies=[Depends(require_token)],
+    name="safe_route_area_risk_research",
+)
 async def safe_route_area_risk_research(request: SafeRouteAreaRiskResearchRequest) -> SafeRouteAreaRiskResearchResponse:
     try:
         await enforce_request_quota("area-risk", "safe-route")
@@ -129,9 +140,3 @@ async def safe_route_area_risk_research(request: SafeRouteAreaRiskResearchReques
         raise
     except Exception as exc:
         raise_internal_server_error(exc, "Area risk research failed.")
-
-
-@app.post("/v1/threatscape/query-risk/research", response_model=SafeRouteAreaRiskResearchResponse, dependencies=[Depends(require_token)])
-async def threatscape_query_risk_research(request: SafeRouteAreaRiskResearchRequest) -> SafeRouteAreaRiskResearchResponse:
-    """Compatibility alias for the ThreatScape query-risk pipeline."""
-    return await safe_route_area_risk_research(request)
