@@ -130,7 +130,6 @@ async def safe_route_area_risk_research(request: SafeRouteAreaRiskResearchReques
         await enforce_request_quota("area-risk", "safe-route")
         async with _request_semaphore:
             payload = await research_safe_route_area_risk(
-                session_id=None,
                 aoi=request.aoi,
                 evidence=request.evidence,
                 max_zones=request.maxZones,

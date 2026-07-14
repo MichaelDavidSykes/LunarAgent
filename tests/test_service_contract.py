@@ -383,7 +383,6 @@ def test_tool_aware_analysis_rescues_schema_only_tool_turn(monkeypatch):
     monkeypatch.setattr(service_module, "run_openai_analysis", fail_openai_analysis)
 
     messages = build_prompt_messages(
-        session_id="session-1",
         allow_ui_actions=False,
         conversation_history=[
             {"role": "user", "content": "What is happening on the 30th in SA?"},
@@ -425,7 +424,6 @@ def test_normalize_model_response_strips_leaked_followups_from_plain_text():
 
 def test_build_prompt_messages_keeps_ui_actions_disabled_until_allowed():
     messages = build_prompt_messages(
-        session_id="session-1",
         allow_ui_actions=False,
         conversation_history=[{"role": "user", "content": "What matters?"}],
         query_preview="FOR doc IN reports RETURN doc",
@@ -451,7 +449,6 @@ def test_build_prompt_messages_keeps_ui_actions_disabled_until_allowed():
 
 def test_broad_current_request_is_not_scope_limited_by_history():
     messages = build_prompt_messages(
-        session_id="session-1",
         allow_ui_actions=False,
         conversation_history=[
             {"role": "user", "content": "What does the current scope say?"},
@@ -469,7 +466,6 @@ def test_broad_current_request_is_not_scope_limited_by_history():
 
 def test_latest_scope_limited_request_still_stays_in_scope():
     messages = build_prompt_messages(
-        session_id="session-1",
         allow_ui_actions=False,
         conversation_history=[
             {"role": "user", "content": "What's happening in South Africa today?"},
@@ -487,7 +483,6 @@ def test_latest_scope_limited_request_still_stays_in_scope():
 
 def test_build_prompt_messages_declares_allowed_actions_when_enabled():
     messages = build_prompt_messages(
-        session_id=None,
         allow_ui_actions=True,
         conversation_history=[],
         query_preview="query",
@@ -568,7 +563,6 @@ def test_safe_route_request_strips_sensitive_aoi_metadata():
     assert request.aoi["labelContext"]["place"] == "Cape Town"
 
     prompt = service_module.build_safe_route_area_risk_web_prompt(
-        session_id=request.sessionId,
         aoi=request.aoi,
         evidence=[],
         max_zones=3,
@@ -1668,7 +1662,6 @@ def test_area_risk_web_prompt_uses_bounded_evidence_and_zone_caps(monkeypatch):
     ]
 
     prompt = service_module.build_safe_route_area_risk_web_prompt(
-        session_id="session-1",
         aoi={"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
         evidence=evidence,
         max_zones=12,
@@ -1694,7 +1687,6 @@ def test_area_risk_evidence_prompt_uses_bounded_evidence_and_zone_caps(monkeypat
     ]
 
     prompt = service_module.build_safe_route_area_risk_evidence_prompt(
-        session_id="session-1",
         aoi={"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
         evidence=evidence,
         max_zones=12,
@@ -1943,7 +1935,6 @@ def test_area_risk_evidence_failure_uses_deterministic_fallback(monkeypatch):
 
     result = asyncio.run(
         service_module.research_safe_route_area_risk(
-            session_id="session-1",
             aoi={
                 "labelContext": {
                     "place": "Cape Town",
@@ -1983,7 +1974,6 @@ def test_area_risk_empty_web_result_does_not_double_call_model(monkeypatch):
 
     result = asyncio.run(
         service_module.research_safe_route_area_risk(
-            session_id="session-1",
             aoi={"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
             evidence=[],
             max_zones=8,
@@ -2013,7 +2003,6 @@ def test_area_risk_web_error_fallback_hides_provider_detail(monkeypatch):
 
     result = asyncio.run(
         service_module.research_safe_route_area_risk(
-            session_id="session-1",
             aoi={"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
             evidence=[],
             max_zones=8,
