@@ -992,10 +992,6 @@ def _report_entity_names(reports: list[dict[str, Any]], limit: int = 12) -> list
     return names
 
 
-def _tool_payloads_have_intelligence_evidence(messages: list[dict[str, Any]]) -> bool:
-    return _tool_payloads_have_graph_evidence(messages) or _tool_payloads_have_public_web_evidence(messages)
-
-
 def _conversation_search_text(messages: list[dict[str, Any]], max_len: int = 900) -> str:
     parts: list[str] = []
     for message in messages:
@@ -1059,7 +1055,10 @@ async def _synthesize_with_rescue_tool_evidence(
     working_messages: list[dict[str, Any]],
     session_id: str | None,
 ) -> str:
-    if not _tool_payloads_have_intelligence_evidence(working_messages):
+    if not (
+        _tool_payloads_have_graph_evidence(working_messages)
+        or _tool_payloads_have_public_web_evidence(working_messages)
+    ):
         try:
             rescue_result = await _execute_tool_call(
                 "search_intelligence_graph",
