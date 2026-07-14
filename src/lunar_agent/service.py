@@ -1477,11 +1477,6 @@ def _extract_text_from_chat_response(data: dict[str, Any]) -> str:
     return ""
 
 
-def _uses_completion_token_limit(model: str) -> bool:
-    normalized = str(model or "").strip().lower()
-    return normalized.startswith(("gpt-5", "o1", "o3", "o4"))
-
-
 def _uses_reasoning_effort(model: str) -> bool:
     normalized = str(model or "").strip().lower()
     return normalized.startswith("gpt-5")
@@ -2228,7 +2223,7 @@ async def _chat_completion_request(
     }
     completion_token_limit = _bounded_chat_completion_tokens()
     legacy_token_limit = _bounded_legacy_chat_tokens()
-    if _uses_completion_token_limit(model_name):
+    if str(model_name or "").strip().lower().startswith(("gpt-5", "o1", "o3", "o4")):
         payload["max_completion_tokens"] = completion_token_limit
         reasoning_effort = _chat_reasoning_effort(model_name)
         if reasoning_effort:
