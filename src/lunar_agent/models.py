@@ -14,12 +14,8 @@ SAFEROUTE_EVIDENCE_MAX_ITEMS = 40
 SAFEROUTE_EVIDENCE_MAX_CHARS = 40000
 
 
-def _json_char_size(value: Any) -> int:
-    return len(json.dumps(value, ensure_ascii=False, default=str))
-
-
 def _bounded_json_value(value: Any, *, max_chars: int, field_name: str) -> Any:
-    if _json_char_size(value) > max_chars:
+    if len(json.dumps(value, ensure_ascii=False, default=str)) > max_chars:
         raise ValueError(f"{field_name} exceeds the maximum allowed JSON size")
     return value
 
