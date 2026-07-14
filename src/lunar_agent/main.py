@@ -105,7 +105,6 @@ async def explorer_agent_respond(request: ExplorerAgentRespondRequest) -> Explor
                 summary=request.querySummary,
                 context=request.queryContext,
                 user_message=request.currentUserMessage,
-                request_id=request.requestId,
             )
         return ExplorerAgentRespondResponse(**payload)
     except HTTPException:

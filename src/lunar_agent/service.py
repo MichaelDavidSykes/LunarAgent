@@ -2942,9 +2942,7 @@ async def respond(
     summary: dict[str, Any],
     context: dict[str, Any],
     user_message: str,
-    request_id: str | None = None,
 ) -> dict[str, Any]:
-    del request_id  # Idempotency is enforced by LunarSurfaceBackend; never send this identifier to the model.
     messages = build_prompt_messages(
         session_id=session_id,
         allow_ui_actions=allow_ui_actions,
