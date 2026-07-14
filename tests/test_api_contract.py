@@ -61,7 +61,7 @@ def test_area_risk_endpoint_hides_internal_error_detail(monkeypatch):
 
 def test_threatscape_query_risk_alias_uses_area_risk_research(monkeypatch):
     async def fake_research_safe_route_area_risk(**kwargs):
-        assert kwargs["session_id"] is None
+        assert "session_id" not in kwargs
         return {"zones": [{"label": "Johannesburg"}], "model": "test-model", "notes": "ok"}
 
     monkeypatch.setattr(main_module, "research_safe_route_area_risk", fake_research_safe_route_area_risk)

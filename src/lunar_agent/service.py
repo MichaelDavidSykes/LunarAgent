@@ -545,7 +545,6 @@ def _normalize_action(action: Any) -> dict[str, Any] | None:
 
 
 def build_prompt_messages(
-    session_id: str | None,
     allow_ui_actions: bool,
     conversation_history: list[dict[str, str]],
     query_preview: str,
@@ -2526,7 +2525,6 @@ async def run_tool_aware_analysis(messages: list[dict[str, Any]], session_id: st
 
 def build_safe_route_area_risk_evidence_prompt(
     *,
-    session_id: str | None,
     aoi: dict[str, Any],
     evidence: list[dict[str, Any]],
     max_zones: int,
@@ -2586,7 +2584,6 @@ def build_safe_route_area_risk_evidence_prompt(
 
 def build_safe_route_area_risk_web_prompt(
     *,
-    session_id: str | None,
     aoi: dict[str, Any],
     evidence: list[dict[str, Any]],
     max_zones: int,
@@ -2823,7 +2820,6 @@ def _normalized_area_risk_zone_quality(zone: dict[str, Any]) -> tuple[int, int, 
 
 async def research_safe_route_area_risk(
     *,
-    session_id: str | None,
     aoi: dict[str, Any],
     evidence: list[dict[str, Any]],
     max_zones: int = 8,
@@ -2836,7 +2832,6 @@ async def research_safe_route_area_risk(
     }
     if settings.area_risk_web_research_enabled:
         web_prompt = build_safe_route_area_risk_web_prompt(
-            session_id=session_id,
             aoi=aoi,
             evidence=evidence,
             max_zones=bounded_max_zones,
@@ -2898,7 +2893,6 @@ async def research_safe_route_area_risk(
 
     try:
         evidence_prompt = build_safe_route_area_risk_evidence_prompt(
-            session_id=session_id,
             aoi=aoi,
             evidence=evidence,
             max_zones=bounded_max_zones,
@@ -2929,7 +2923,6 @@ async def respond(
     user_message: str,
 ) -> dict[str, Any]:
     messages = build_prompt_messages(
-        session_id=session_id,
         allow_ui_actions=allow_ui_actions,
         conversation_history=conversation_history,
         query_preview=query_preview,
