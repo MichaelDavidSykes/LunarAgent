@@ -1083,11 +1083,12 @@ def _tool_payloads_have_graph_evidence(messages: list[dict[str, Any]]) -> bool:
     for payload in _tool_result_payloads(messages):
         if str(payload.get("status") or "success").strip().lower() in {"error", "failed", "unavailable"}:
             continue
-        if isinstance(payload.get("reports"), list) and payload.get("reports"):
-            return True
-        if isinstance(payload.get("matches"), list) and payload.get("matches"):
-            return True
-        if isinstance(payload.get("report"), dict) and payload.get("report"):
+        evidence = (
+            (payload.get("reports"), list),
+            (payload.get("matches"), list),
+            (payload.get("report"), dict),
+        )
+        if any(isinstance(value, expected_type) and value for value, expected_type in evidence):
             return True
         if int(payload.get("resultCount") or 0) > 0 and isinstance(payload.get("result"), list) and payload.get("result"):
             return True
