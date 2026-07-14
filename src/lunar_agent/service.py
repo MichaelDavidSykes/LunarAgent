@@ -46,7 +46,7 @@ def _safe_http_url(value: Any, max_len: int = 500) -> str:
         ip = None
     if ip is not None and not ip.is_global:
         return ""
-    elif host.isdigit() or "." not in host:
+    if host.isdigit() or "." not in host:
         return ""
     return text
 
