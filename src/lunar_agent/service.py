@@ -1531,7 +1531,7 @@ async def _post_responses_request(
     if response.status_code == 400 and "reasoning" in payload and "reasoning" in (response.text or "").lower():
         retry_payload = dict(payload)
         retry_payload.pop("reasoning", None)
-        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=retry_payload)
+        return await client.post("https://api.openai.com/v1/responses", headers=headers, json=retry_payload)
     return response
 
 
