@@ -44,9 +44,8 @@ def _safe_http_url(value: Any, max_len: int = 500) -> str:
         ip = ipaddress.ip_address(host)
     except ValueError:
         ip = None
-    if ip is not None:
-        if not ip.is_global:
-            return ""
+    if ip is not None and not ip.is_global:
+        return ""
     elif host.isdigit() or "." not in host:
         return ""
     return text
@@ -2739,9 +2738,9 @@ def normalize_safe_route_area_risk_payload(
         if lat is None and lon is None and len(coordinates) >= 3:
             lat = sum(point["lat"] for point in coordinates) / len(coordinates)
             lon = sum(point["lon"] for point in coordinates) / len(coordinates)
+        if aoi_bounds and (lat is None or lon is None or not _point_in_safe_route_aoi(lat, lon, aoi_bounds)):
+            continue
         if aoi_bounds:
-            if lat is None or lon is None or not _point_in_safe_route_aoi(lat, lon, aoi_bounds):
-                continue
             if coordinates and (
                 len(coordinates) < 3
                 or any(not _point_in_safe_route_aoi(point["lat"], point["lon"], aoi_bounds) for point in coordinates)
