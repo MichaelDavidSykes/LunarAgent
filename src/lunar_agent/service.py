@@ -1168,6 +1168,17 @@ def _request_mentions_current_scope(text: str) -> bool:
     ))
 
 
+def _request_mentions_graph_wide_scope(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:full|whole|entire|wider|broader|complete|all)\s+(?:intelligence\s+)?graph\b",
+            text,
+        )
+        or re.search(r"\b(?:graph-wide|full-graph|wider graph|broader graph)\b", text)
+        or re.search(r"\b(?:beyond|outside)\s+(?:the\s+)?(?:current\s+)?scope\b", text)
+    )
+
+
 def _request_wants_public_web_context(messages: list[dict[str, Any]]) -> bool:
     latest = _latest_user_request_text(messages)
     latest_lower = latest.lower()
@@ -1191,29 +1202,13 @@ def _request_wants_graph_wide_context(messages: list[dict[str, Any]]) -> bool:
     latest_lower = latest.lower()
     combined = f"{latest} | {text}".lower()
     latest_explicitly_scope_limited = _request_mentions_current_scope(latest_lower)
-    latest_explicitly_wide = bool(
-        re.search(
-            r"\b(?:full|whole|entire|wider|broader|complete|all)\s+(?:intelligence\s+)?graph\b",
-            latest_lower,
-        )
-        or re.search(r"\b(?:graph-wide|full-graph|wider graph|broader graph)\b", latest_lower)
-        or re.search(r"\b(?:beyond|outside)\s+(?:the\s+)?(?:current\s+)?scope\b", latest_lower)
-    )
-    if latest_explicitly_wide:
+    if _request_mentions_graph_wide_scope(latest_lower):
         return True
     if latest_explicitly_scope_limited:
         return False
     if _request_wants_public_web_context(messages):
         return True
-    explicitly_wide = bool(
-        re.search(
-            r"\b(?:full|whole|entire|wider|broader|complete|all)\s+(?:intelligence\s+)?graph\b",
-            combined,
-        )
-        or re.search(r"\b(?:graph-wide|full-graph|wider graph|broader graph)\b", combined)
-        or re.search(r"\b(?:beyond|outside)\s+(?:the\s+)?(?:current\s+)?scope\b", combined)
-    )
-    if explicitly_wide:
+    if _request_mentions_graph_wide_scope(combined):
         return True
     return bool(
         re.search(
