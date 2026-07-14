@@ -2730,12 +2730,11 @@ def normalize_safe_route_area_risk_payload(
             lon = sum(point["lon"] for point in coordinates) / len(coordinates)
         if aoi_bounds and (lat is None or lon is None or not _point_in_safe_route_aoi(lat, lon, aoi_bounds)):
             continue
-        if aoi_bounds:
-            if coordinates and (
-                len(coordinates) < 3
-                or any(not _point_in_safe_route_aoi(point["lat"], point["lon"], aoi_bounds) for point in coordinates)
-            ):
-                coordinates = []
+        if aoi_bounds and coordinates and (
+            len(coordinates) < 3
+            or any(not _point_in_safe_route_aoi(point["lat"], point["lon"], aoi_bounds) for point in coordinates)
+        ):
+            coordinates = []
         radius = _coerce_bounded_float(
             raw_zone.get("radius_m") or raw_zone.get("radiusM") or (1200 if aoi_bounds else None),
             200 if aoi_bounds else 0,
