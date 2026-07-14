@@ -174,8 +174,8 @@ def _sanitize_public_aoi(value: dict[str, Any]) -> dict[str, Any]:
 
 
 _PRIVATE_CONTEXT_KEY_FRAGMENTS = {
-    "clientid", "client_id", "clientname", "client_name", "tenant", "workspaceid", "workspace_id",
-    "userid", "user_id", "username", "email", "token", "secret", "password", "sessionid", "session_id",
+    "clientid", "clientname", "tenant", "workspaceid", "userid", "username", "email", "token",
+    "secret", "password", "sessionid",
 }
 
 
@@ -194,7 +194,7 @@ def _strip_private_context_fields(value: Any, depth: int = 0) -> Any:
         key = str(raw_key or "").strip()
         normalized = key.casefold().replace("-", "_")
         compact = normalized.replace("_", "")
-        if any(fragment in normalized or fragment.replace("_", "") in compact for fragment in _PRIVATE_CONTEXT_KEY_FRAGMENTS):
+        if any(fragment in compact for fragment in _PRIVATE_CONTEXT_KEY_FRAGMENTS):
             continue
         next_value = _strip_private_context_fields(item, depth + 1)
         if next_value is not None:
