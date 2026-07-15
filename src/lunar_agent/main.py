@@ -69,14 +69,14 @@ def require_token(authorization: str | None = Header(default=None)) -> None:
 async def health() -> dict:
     if not str(settings.shared_token or "").strip():
         raise HTTPException(status_code=503, detail="Agent authentication is unavailable")
-    missing = []
-    if not str(settings.openai_api_key or "").strip():
-        missing.append("openai")
-    if not str(settings.backend_base_url or "").strip():
-        missing.append("backend_url")
-    if not str(settings.backend_shared_token or "").strip():
-        missing.append("backend_auth")
-    if missing:
+    if any(
+        not str(value or "").strip()
+        for value in (
+            settings.openai_api_key,
+            settings.backend_base_url,
+            settings.backend_shared_token,
+        )
+    ):
         raise HTTPException(status_code=503, detail="Agent dependencies are not configured")
     return {
         "status": "ok",
