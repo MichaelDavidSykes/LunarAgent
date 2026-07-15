@@ -108,7 +108,7 @@ def _safe_parse_json_object(text: str) -> dict[str, Any] | None:
     candidates = [cleaned]
     start = cleaned.find("{")
     end = cleaned.rfind("}")
-    if start >= 0 and end > start:
+    if start >= 0 and end > start and (start != 0 or end != len(cleaned) - 1):
         candidates.append(cleaned[start : end + 1])
 
     for candidate in candidates:
@@ -1842,10 +1842,9 @@ def normalize_public_web_search_payload(payload: dict[str, Any], *, query: str) 
         title = _trim_text(item.get("title") or item.get("source") or item.get("publisher"), 180)
         if not url or url not in verified_urls:
             continue
-        if url and url in seen_urls:
+        if url in seen_urls:
             continue
-        if url:
-            seen_urls.add(url)
+        seen_urls.add(url)
         source = {
             "title": title,
             "publisher": _trim_text(item.get("publisher") or item.get("source"), 140),
