@@ -105,23 +105,19 @@ def _safe_parse_json_object(text: str) -> dict[str, Any] | None:
     if not cleaned:
         return None
 
-    try:
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-
+    candidates = [cleaned]
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start >= 0 and end > start:
-        candidate = cleaned[start : end + 1]
+        candidates.append(cleaned[start : end + 1])
+
+    for candidate in candidates:
         try:
             parsed = json.loads(candidate)
             if isinstance(parsed, dict):
                 return parsed
         except Exception:
-            return None
+            continue
     return None
 
 
