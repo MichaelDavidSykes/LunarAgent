@@ -1095,8 +1095,6 @@ def _public_web_payload_has_evidence(payload: dict[str, Any]) -> bool:
     status = str(payload.get("status") or "success").strip().lower()
     if status not in {"success", "ok", "completed"}:
         return False
-    findings = payload.get("findings")
-    sources = payload.get("sources")
     verified_urls = {
         safe_url
         for url in (payload.get("verifiedSourceUrls") or [])
@@ -1104,14 +1102,14 @@ def _public_web_payload_has_evidence(payload: dict[str, Any]) -> bool:
     }
     if not verified_urls:
         return False
-    if isinstance(findings, list):
-        for finding in findings:
-            if isinstance(finding, dict) and _safe_http_url(finding.get("url"), 500) in verified_urls:
-                return True
-    if isinstance(sources, list):
-        for source in sources:
-            if isinstance(source, dict) and _safe_http_url(source.get("url"), 500) in verified_urls:
-                return True
+    for entries in (payload.get("findings"), payload.get("sources")):
+        if not isinstance(entries, list):
+            continue
+        if any(
+            isinstance(entry, dict) and _safe_http_url(entry.get("url"), 500) in verified_urls
+            for entry in entries
+        ):
+            return True
     return False
 
 
