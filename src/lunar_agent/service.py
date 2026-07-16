@@ -6,7 +6,7 @@ import logging
 import math
 import re
 import ipaddress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -573,7 +573,7 @@ def build_prompt_messages(
             "runtime": "lunar-agent",
             "mode": "interactive-intelligence-analysis",
         },
-        "currentDateUtc": datetime.now(timezone.utc).date().isoformat(),
+        "currentDateUtc": datetime.now(UTC).date().isoformat(),
         "allowUiActions": bool(allow_ui_actions),
         "allowedActions": ([
             {
@@ -1756,7 +1756,7 @@ def build_public_web_search_prompt(
             "runtime": "lunar-agent",
             "mode": "public-web-research-tool",
         },
-        "currentDateUtc": datetime.now(timezone.utc).date().isoformat(),
+        "currentDateUtc": datetime.now(UTC).date().isoformat(),
         "query": _trim_text(query, 500),
         "focus": _trim_text(focus, 240) or None,
         "region": _trim_text(region, 120) or None,
@@ -1857,7 +1857,7 @@ def normalize_public_web_search_payload(payload: dict[str, Any], *, query: str) 
     return {
         "tool": "search_public_web",
         "query": _trim_text(query, 500),
-        "searchedAt": datetime.now(timezone.utc).isoformat(),
+        "searchedAt": datetime.now(UTC).isoformat(),
         "summary": _trim_text(summary, 2200),
         "findings": findings,
         "sources": sources,
@@ -2098,7 +2098,7 @@ async def _execute_tool_call(name: str, arguments: dict[str, Any], session_id: s
                 "tool": "search_public_web",
                 "status": "success",
                 "query": query,
-                "searchedAt": datetime.now(timezone.utc).isoformat(),
+                "searchedAt": datetime.now(UTC).isoformat(),
                 "summary": _trim_text(raw_answer, 2200),
                 "findings": [],
                 "sources": [],
