@@ -1098,9 +1098,9 @@ def _public_web_payload_has_evidence(payload: dict[str, Any]) -> bool:
     findings = payload.get("findings")
     sources = payload.get("sources")
     verified_urls = {
-        _safe_http_url(url, 500)
+        safe_url
         for url in (payload.get("verifiedSourceUrls") or [])
-        if _safe_http_url(url, 500)
+        if (safe_url := _safe_http_url(url, 500))
     }
     if not verified_urls:
         return False
