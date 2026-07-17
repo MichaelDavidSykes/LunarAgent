@@ -30,6 +30,15 @@ _EVENT_TYPES = {
 
 
 def _project_root() -> Path:
+    configured_root = str(os.getenv("LUNAR_AGENT_APP_ROOT") or "").strip()
+    candidates = [
+        Path(configured_root).expanduser() if configured_root else None,
+        Path.cwd(),
+        Path(__file__).resolve().parents[2],
+    ]
+    for candidate in candidates:
+        if candidate and (candidate / "codex_runtime" / "runner.mjs").is_file():
+            return candidate.resolve()
     return Path(__file__).resolve().parents[2]
 
 

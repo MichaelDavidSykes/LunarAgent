@@ -146,6 +146,7 @@ Optional:
 - `LUNAR_HOME_AGENT_MAX_CONCURRENT_REQUESTS` (default `2`)
 - `LUNAR_HOME_AGENT_WORKSPACE_ROOT` (default `/tmp/lunar-home-workspaces`)
 - `CODEX_HOME` (default and production value `/codex-auth`)
+- `LUNAR_AGENT_APP_ROOT` (production image value `/app`)
 - `CODEX_CLI_PATH` (optional bundled CLI override)
 - `CODEX_NODE_BINARY` (default `node`)
 

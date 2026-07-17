@@ -5,7 +5,8 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HOME=/home/lunaragent \
-    CODEX_HOME=/codex-auth
+    CODEX_HOME=/codex-auth \
+    LUNAR_AGENT_APP_ROOT=/app
 
 WORKDIR /app
 
