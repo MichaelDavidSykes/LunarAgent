@@ -42,6 +42,16 @@ def test_home_agent_request_rejects_oversized_message():
         )
 
 
+def test_project_root_uses_deployed_application_root(tmp_path, monkeypatch):
+    runtime = tmp_path / "codex_runtime"
+    runtime.mkdir()
+    (runtime / "runner.mjs").write_text("// deployed runner", encoding="utf-8")
+    monkeypatch.setenv("LUNAR_AGENT_APP_ROOT", str(tmp_path))
+
+    assert home_module._project_root() == tmp_path.resolve()
+    assert home_module._runner_path() == runtime / "runner.mjs"
+
+
 def test_runtime_streams_events_and_keeps_service_secrets_out_of_child_env(
     tmp_path,
     monkeypatch,
