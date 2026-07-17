@@ -350,16 +350,9 @@ def _normalize_area_risk_coordinates(value: Any) -> list[dict[str, float]]:
 
 
 def _normalize_module_key(value: Any) -> str | None:
-    text = str(value or "").strip().lower()
-    if not text:
-        return None
-    text = text.removeprefix("module-")
+    text = str(value or "").strip().lower().removeprefix("module-")
     text = text.replace(" module", "").strip()
-    if not text:
-        return None
-    return f"module-{text}"
-
-
+    return f"module-{text}" if text else None
 
 
 _LEAKED_RESPONSE_FIELD_PATTERN = re.compile(
