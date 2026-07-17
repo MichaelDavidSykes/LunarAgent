@@ -1,6 +1,7 @@
 # LunarAgent
 
-`LunarAgent` is the dedicated reasoning service for Explorer AI mode.
+`LunarAgent` is the dedicated reasoning service for Explorer AI mode and the
+AI-first Lunar Home experience.
 
 The current design keeps responsibilities separated:
 
@@ -14,6 +15,30 @@ The current design keeps responsibilities separated:
   - `followUps`
 
 This keeps auth and graph access in the backend while still letting the agent do report-level reasoning.
+
+## Lunar Home Codex runtime
+
+`POST /v1/home-agent/respond` runs a persistent Codex SDK thread using
+ChatGPT-managed Codex authentication rather than `OPENAI_API_KEY` billing.
+The runtime is configured for `gpt-5.6-sol` with `ultra` reasoning, live web
+research, workspace-scoped command execution, and the LunarGraph MCP bridge.
+
+Security boundaries:
+
+- the browser never receives ChatGPT auth, graph credentials, or service tokens;
+- the Python service launches Codex with a scrubbed environment;
+- a least-privilege Codex permission profile denies model-generated commands
+  from reading `CODEX_HOME` (including `auth.json`) or Linux process metadata;
+- shell commands have no direct network path; current research uses Codex's
+  native live web-search tool and graph access uses the scoped MCP bridge;
+- graph access uses a short-lived, per-turn, read-only delegated token;
+- write AQL is rejected by the backend guardrail;
+- detailed SDK events are streamed back to the backend, with credentials and
+  raw chain-of-thought removed;
+- consequential external actions are not enabled.
+
+The response includes Markdown, grounded clickable entities, citations, the
+Codex thread id for follow-up turns, and model metadata.
 
 ## API
 
@@ -42,6 +67,37 @@ Input:
   "currentUserMessage": "Which actors matter most here?"
 }
 ```
+
+### `POST /v1/home-agent/respond`
+
+Input:
+
+```json
+{
+  "threadId": "home-thread-id",
+  "turnId": "turn-id",
+  "codexThreadId": null,
+  "clientId": "workspace-id",
+  "currentUserMessage": "Investigate this supplier and its network.",
+  "selectedEntities": [],
+  "conversationHistory": []
+}
+```
+
+Output:
+
+```json
+{
+  "final_response": "grounded Markdown answer",
+  "codex_thread_id": "persistent-codex-thread-id",
+  "model": "gpt-5.6-sol",
+  "entities": [],
+  "citations": []
+}
+```
+
+`GET /v1/home-agent/health` verifies the Home runtime, backend bridge, and
+mounted ChatGPT-managed Codex authentication.
 
 Output:
 
@@ -83,6 +139,19 @@ Optional:
 - `LUNAR_AGENT_AREA_RISK_MAX_EVIDENCE_ITEMS` (default `12`)
 - `LUNAR_AGENT_AREA_RISK_MAX_ZONES` (default `6`)
 - `LUNAR_AGENT_AREA_RISK_FALLBACK_ON_EMPTY_WEB` (default `false`, avoids a second model call when web research returns no named zones)
+- `LUNAR_HOME_AGENT_ENABLED` (default `true`)
+- `LUNAR_HOME_AGENT_MODEL` (default `gpt-5.6-sol`)
+- `LUNAR_HOME_AGENT_REASONING_EFFORT` (default `ultra`)
+- `LUNAR_HOME_AGENT_TIMEOUT` (default `900`)
+- `LUNAR_HOME_AGENT_MAX_CONCURRENT_REQUESTS` (default `2`)
+- `LUNAR_HOME_AGENT_WORKSPACE_ROOT` (default `/tmp/lunar-home-workspaces`)
+- `CODEX_HOME` (default and production value `/codex-auth`)
+- `CODEX_CLI_PATH` (optional bundled CLI override)
+- `CODEX_NODE_BINARY` (default `node`)
+
+The existing Explorer routes still require `OPENAI_API_KEY`. Lunar Home does
+not pass that key to Codex and uses the ChatGPT-managed auth mounted at
+`CODEX_HOME`.
 
 Callers must send the configured `LUNAR_AGENT_SHARED_TOKEN`:
 
@@ -96,6 +165,7 @@ Authorization: Bearer <token>
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+npm ci
 uvicorn lunar_agent.main:app --reload --port 8310
 ```
 
@@ -119,5 +189,20 @@ The shared token is used both ways:
 
 - `LunarSurfaceBackend -> LunarAgent` for the main `/v1/explorer-agent/respond` call
 - `LunarAgent -> LunarSurfaceBackend` for the internal scoped report tools
+
+For Home, the backend also issues a short-lived delegated graph token bound to
+the active Home turn. The MCP process receives only that scoped token, never
+the long-lived backend token.
+
+## Production Codex authentication
+
+Provision Codex authentication interactively on the host and store it outside
+the repository. The systemd unit expects the protected host directory
+`/etc/lunar-agent/codex` to be mounted at `/codex-auth`. This no-dot container
+alias is deliberate: the SDK applies an exact deny-read permission rule to it
+for every model-generated command, while the parent Codex process can still
+authenticate. Set host
+ownership to container UID `10001`, restrict directory permissions, and treat
+`auth.json` like a password. Never commit or print its contents.
 
 If `EXPLORER_AGENT_BASE_URL` is unset, the backend falls back to its current in-process Explorer agent logic.

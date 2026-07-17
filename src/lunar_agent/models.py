@@ -4,7 +4,7 @@ import json
 import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 EXPLORER_AGENT_MESSAGE_MAX_CHARS = 2800
 EXPLORER_AGENT_HISTORY_MAX_MESSAGES = 10
@@ -12,6 +12,8 @@ EXPLORER_AGENT_CONTEXT_MAX_CHARS = 20000
 SAFEROUTE_AOI_MAX_CHARS = 12000
 SAFEROUTE_EVIDENCE_MAX_ITEMS = 40
 SAFEROUTE_EVIDENCE_MAX_CHARS = 40000
+HOME_AGENT_HISTORY_MAX_MESSAGES = 20
+HOME_AGENT_CONTEXT_MAX_CHARS = 40000
 
 
 def _bounded_json_value(value: Any, *, max_chars: int, field_name: str) -> Any:
@@ -96,6 +98,62 @@ class SafeRouteAreaRiskResearchResponse(BaseModel):
     zones: list[dict[str, Any]] = Field(default_factory=list)
     model: str | None = None
     notes: str | None = None
+
+
+class HomeAgentSelectedEntity(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(..., min_length=1, max_length=240)
+    type: str = Field(..., min_length=1, max_length=80)
+    label: str = Field(..., min_length=1, max_length=240)
+    graph_ref: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("graph_ref", "graphRef"),
+        max_length=500,
+    )
+
+
+class HomeAgentHistoryMessage(BaseModel):
+    role: Literal["assistant", "user"]
+    content: str = Field(..., min_length=1, max_length=12000)
+
+
+class HomeAgentRespondRequest(BaseModel):
+    threadId: str = Field(..., min_length=1, max_length=120)
+    turnId: str = Field(..., min_length=1, max_length=120)
+    codexThreadId: str | None = Field(default=None, max_length=180)
+    clientId: str = Field(..., min_length=1, max_length=160)
+    currentUserMessage: str = Field(..., min_length=1, max_length=6000)
+    selectedEntities: list[HomeAgentSelectedEntity] = Field(default_factory=list, max_length=24)
+    conversationHistory: list[HomeAgentHistoryMessage] = Field(
+        default_factory=list,
+        max_length=HOME_AGENT_HISTORY_MAX_MESSAGES,
+    )
+
+    @field_validator("currentUserMessage")
+    @classmethod
+    def validate_home_message(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if len(normalized.split()) > 900:
+            raise ValueError("Home Agent messages cannot exceed 900 words")
+        return normalized
+
+    @field_validator("selectedEntities", "conversationHistory")
+    @classmethod
+    def validate_home_context_size(cls, value):
+        return _bounded_json_value(
+            value,
+            max_chars=HOME_AGENT_CONTEXT_MAX_CHARS,
+            field_name="Home Agent context",
+        )
+
+
+class HomeAgentRespondResponse(BaseModel):
+    final_response: str = Field(..., max_length=60000)
+    codex_thread_id: str | None = Field(default=None, max_length=180)
+    model: str | None = Field(default=None, max_length=120)
+    entities: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    citations: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
 
 
 def _finite_number(value: Any, minimum: float, maximum: float) -> float | None:
