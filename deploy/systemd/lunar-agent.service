@@ -20,6 +20,12 @@ Environment=LUNAR_AGENT_AREA_RISK_MAX_OUTPUT_TOKENS=700
 Environment=LUNAR_AGENT_AREA_RISK_MAX_EVIDENCE_ITEMS=12
 Environment=LUNAR_AGENT_AREA_RISK_MAX_ZONES=6
 Environment=LUNAR_AGENT_AREA_RISK_FALLBACK_ON_EMPTY_WEB=false
+Environment=LUNAR_HOME_AGENT_ENABLED=true
+Environment=LUNAR_HOME_AGENT_MODEL=gpt-5.6-sol
+Environment=LUNAR_HOME_AGENT_REASONING_EFFORT=ultra
+Environment=LUNAR_HOME_AGENT_TIMEOUT=900
+Environment=LUNAR_HOME_AGENT_MAX_CONCURRENT_REQUESTS=2
+Environment=CODEX_HOME=/codex-auth
 ExecStartPre=-/usr/bin/docker rm -f lunar-agent
 ExecStart=/usr/bin/docker run --rm \
   --name lunar-agent \
@@ -38,15 +44,22 @@ ExecStart=/usr/bin/docker run --rm \
   --env LUNAR_AGENT_AREA_RISK_MAX_EVIDENCE_ITEMS \
   --env LUNAR_AGENT_AREA_RISK_MAX_ZONES \
   --env LUNAR_AGENT_AREA_RISK_FALLBACK_ON_EMPTY_WEB \
+  --env LUNAR_HOME_AGENT_ENABLED \
+  --env LUNAR_HOME_AGENT_MODEL \
+  --env LUNAR_HOME_AGENT_REASONING_EFFORT \
+  --env LUNAR_HOME_AGENT_TIMEOUT \
+  --env LUNAR_HOME_AGENT_MAX_CONCURRENT_REQUESTS \
+  --env CODEX_HOME \
+  --volume /etc/lunar-agent/codex:/codex-auth:rw \
   --publish 127.0.0.1:8310:8310 \
   --publish 172.17.0.1:8310:8310 \
   --security-opt no-new-privileges \
   --cap-drop ALL \
   --read-only \
-  --memory 768m \
-  --cpus 2 \
-  --pids-limit 128 \
-  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --memory 1536m \
+  --cpus 4 \
+  --pids-limit 256 \
+  --tmpfs /tmp:rw,exec,nosuid,size=512m \
   lunar-agent:latest
 ExecStop=/usr/bin/docker stop lunar-agent
 Restart=always

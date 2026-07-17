@@ -149,3 +149,54 @@ def test_health_fails_when_runtime_dependencies_are_missing(monkeypatch):
 
     assert TestClient(main_module.app).get("/health").status_code == 503
     assert TestClient(main_module.app).get("/live").status_code == 200
+
+
+def test_home_agent_endpoint_uses_codex_runtime_without_exposing_errors(monkeypatch):
+    async def fake_home_turn(request):
+        assert request.threadId == "home-thread-1"
+        return {
+            "final_response": "Investigated",
+            "codex_thread_id": "codex-thread-1",
+            "model": "gpt-5.6-sol",
+            "entities": [],
+            "citations": [],
+        }
+
+    monkeypatch.setattr(main_module, "run_home_agent_turn", fake_home_turn)
+    client = _authenticated_client(monkeypatch)
+    response = client.post(
+        "/v1/home-agent/respond",
+        json={
+            "threadId": "home-thread-1",
+            "turnId": "turn-1",
+            "clientId": "client-1",
+            "currentUserMessage": "Investigate Acme",
+            "selectedEntities": [],
+            "conversationHistory": [],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["final_response"] == "Investigated"
+    assert response.json()["model"] == "gpt-5.6-sol"
+
+
+def test_home_agent_endpoint_hides_codex_failure_detail(monkeypatch):
+    async def fail_home_turn(_request):
+        raise RuntimeError("chatgpt-auth-secret")
+
+    monkeypatch.setattr(main_module, "run_home_agent_turn", fail_home_turn)
+    client = _authenticated_client(monkeypatch)
+    response = client.post(
+        "/v1/home-agent/respond",
+        json={
+            "threadId": "home-thread-1",
+            "turnId": "turn-1",
+            "clientId": "client-1",
+            "currentUserMessage": "Investigate Acme",
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Home Agent response failed."}
+    assert "chatgpt-auth-secret" not in response.text

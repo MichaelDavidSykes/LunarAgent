@@ -1,0 +1,13 @@
+{
+  "name": "lunar-agent-codex-runtime",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@openai/codex-sdk": "0.144.5",
+    "zod": "4.3.5"
+  }
+}
