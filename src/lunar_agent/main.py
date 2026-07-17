@@ -31,11 +31,10 @@ async def enforce_request_quota(quota_key: str | None, category: str) -> None:
         daily = min(daily * 4, 10000)
     async with _quota_lock:
         events = [timestamp for timestamp in _quota_events.get(key, []) if now - timestamp <= 86400]
+        _quota_events[key] = events
         if len(events) >= daily or sum(1 for timestamp in events if now - timestamp <= 3600) >= hourly:
-            _quota_events[key] = events
             raise HTTPException(status_code=429, detail="LunarAgent request quota exceeded")
         events.append(now)
-        _quota_events[key] = events
 
 
 def raise_internal_server_error(exc: Exception, public_detail: str) -> None:
