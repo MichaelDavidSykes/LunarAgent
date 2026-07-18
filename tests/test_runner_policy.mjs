@@ -25,6 +25,12 @@ test("runtime activity never forwards model reasoning text", () => {
   assert.doesNotMatch(runner, /summary: bounded\(item\.text/);
 });
 
+test("runtime activity content is redacted before it is emitted", () => {
+  assert.match(runner, /redactSensitiveTextWithCount/);
+  assert.match(runner, /activitySensitiveTextRemoved/);
+  assert.match(runner, /responseSensitiveTextRemoved/);
+});
+
 test("alerting defaults off unless the user explicitly requests it", () => {
   assert.match(
     runner,
