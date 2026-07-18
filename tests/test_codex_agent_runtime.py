@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -682,10 +683,22 @@ setInterval(() => {{}}, 1000);
     assert runner_stopped.read_text(encoding="utf-8") == "stopped"
     assert child_stopped.read_text(encoding="utf-8") == "stopped"
     child_pid = int(ready.read_text(encoding="utf-8"))
-    for _ in range(100):
+
+    def child_is_running() -> bool:
         try:
             os.kill(child_pid, 0)
         except ProcessLookupError:
+            return False
+        proc_stat = Path(f"/proc/{child_pid}/stat")
+        if proc_stat.is_file():
+            try:
+                return proc_stat.read_text(encoding="utf-8").split()[2] != "Z"
+            except (OSError, IndexError):
+                pass
+        return True
+
+    for _ in range(100):
+        if not child_is_running():
             break
         time.sleep(0.02)
     else:
