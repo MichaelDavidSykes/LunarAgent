@@ -67,6 +67,8 @@ _SAFE_FAILURE_MESSAGES = {
         "The Codex investigation runtime is temporarily unavailable. Retry this turn."
     ),
 }
+_codex_auth_failure_fingerprint: tuple[int, int, int] | None = None
+_codex_auth_probe_cache: tuple[tuple[int, int, int], str | None, float] | None = None
 
 
 class ExplorerCodexRuntimeError(RuntimeError):
@@ -137,6 +139,89 @@ def _runtime_failure_code(exc: BaseException, stderr: str = "") -> str:
     return "runtime_unavailable"
 
 
+def _codex_auth_file() -> Path:
+    return Path(_codex_home()).expanduser() / "auth.json"
+
+
+def _codex_auth_file_fingerprint() -> tuple[int, int, int] | None:
+    try:
+        stat = _codex_auth_file().stat()
+    except OSError:
+        return None
+    return (int(stat.st_ino), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _mark_codex_auth_unavailable() -> None:
+    global _codex_auth_failure_fingerprint, _codex_auth_probe_cache
+    _codex_auth_failure_fingerprint = _codex_auth_file_fingerprint()
+    _codex_auth_probe_cache = None
+
+
+def _clear_codex_auth_failure() -> None:
+    global _codex_auth_failure_fingerprint
+    _codex_auth_failure_fingerprint = None
+
+
+def _codex_cli_command() -> list[str] | None:
+    configured = str(settings.codex_cli_path or "").strip()
+    candidate = Path(configured).expanduser() if configured else (
+        _project_root() / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    )
+    if candidate.is_file():
+        return [_node_binary(), str(candidate)] if candidate.suffix == ".js" else [str(candidate)]
+    resolved = shutil.which(configured) if configured else shutil.which("codex")
+    return [resolved] if resolved else None
+
+
+async def _codex_login_method() -> str | None:
+    command = _codex_cli_command()
+    if not command:
+        return None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            "login",
+            "status",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=_safe_runner_env(),
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=3)
+    except asyncio.TimeoutError:
+        if "process" in locals():
+            await _terminate_process(process)
+        return None
+    except Exception:
+        return None
+    if process.returncode != 0:
+        return None
+    status_text = b"\n".join((stdout[:1000], stderr[:1000])).decode(
+        "utf-8",
+        errors="replace",
+    ).casefold()
+    if "logged in using chatgpt" in status_text:
+        return "chatgpt"
+    if "logged in using" in status_text and "api key" in status_text:
+        return "api"
+    return None
+
+
+async def _cached_codex_login_method(
+    auth_fingerprint: tuple[int, int, int],
+) -> str | None:
+    global _codex_auth_probe_cache
+    now = time.monotonic()
+    if (
+        _codex_auth_probe_cache
+        and _codex_auth_probe_cache[0] == auth_fingerprint
+        and _codex_auth_probe_cache[2] > now
+    ):
+        return _codex_auth_probe_cache[1]
+    method = await _codex_login_method()
+    _codex_auth_probe_cache = (auth_fingerprint, method, now + 10)
+    return method
+
+
 async def command_broker_status() -> dict[str, Any]:
     socket_path = str(settings.command_broker_socket or "").strip()
     token = str(settings.command_broker_token or "").strip()
@@ -172,6 +257,8 @@ async def _emit_runtime_failure(
     code: str,
     duration_ms: int,
 ) -> None:
+    if code == "codex_auth_unavailable":
+        _mark_codex_auth_unavailable()
     try:
         await sink(
             "tool.progress",
@@ -535,6 +622,7 @@ async def run_explorer_codex_turn(
         len(result.get("citations") or []),
         len(result.get("actions") or []),
     )
+    _clear_codex_auth_failure()
 
     return ExplorerAgentRespondResponse(
         reply=str(result.get("finalResponse") or "").strip()[:60000],
@@ -548,17 +636,26 @@ async def run_explorer_codex_turn(
 
 
 async def codex_auth_status() -> dict[str, Any]:
-    codex_home = Path(_codex_home()).expanduser()
-    auth_file_present = (codex_home / "auth.json").is_file()
-    cli = str(settings.codex_cli_path or "").strip()
-    if not cli:
-        cli = str(_project_root() / "node_modules" / "@openai" / "codex" / "bin" / "codex.js")
-    if not Path(cli).is_file() and not shutil.which(cli):
+    auth_fingerprint = _codex_auth_file_fingerprint()
+    if not _codex_cli_command():
         return {"configured": False, "mode": "chatgpt", "detail": "Codex CLI is unavailable"}
-    if not auth_file_present:
+    if auth_fingerprint is None:
         return {
             "configured": False,
             "mode": "chatgpt",
             "detail": "ChatGPT-managed Codex authentication is not mounted",
         }
+    if _codex_auth_failure_fingerprint == auth_fingerprint:
+        return {
+            "configured": False,
+            "mode": "chatgpt",
+            "detail": "ChatGPT-managed Codex authentication must be reconnected",
+        }
+    if await _cached_codex_login_method(auth_fingerprint) != "chatgpt":
+        return {
+            "configured": False,
+            "mode": "chatgpt",
+            "detail": "ChatGPT-managed Codex authentication is unavailable",
+        }
+    _clear_codex_auth_failure()
     return {"configured": True, "mode": "chatgpt", "detail": "ChatGPT-managed Codex authentication"}
