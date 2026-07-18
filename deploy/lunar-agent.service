@@ -2,6 +2,8 @@
 Description=LunarAgent private reasoning service
 Wants=network-online.target docker.service
 Requires=lunar-agent-command-broker.service
+BindsTo=lunar-agent-command-broker.service
+PartOf=lunar-agent-command-broker.service
 After=network-online.target docker.service lunar-agent-command-broker.service
 
 [Service]

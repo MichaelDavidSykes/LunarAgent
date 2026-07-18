@@ -20,6 +20,9 @@ def test_agent_container_cannot_mount_host_command_workspaces() -> None:
         "--volume /run/lunar-agent-command-broker:"
         "/run/lunar-agent-command-broker:ro"
     ) in unit
+    assert "Requires=lunar-agent-command-broker.service" in unit
+    assert "BindsTo=lunar-agent-command-broker.service" in unit
+    assert "PartOf=lunar-agent-command-broker.service" in unit
 
 
 def test_broker_owns_the_only_host_command_workspace_mount() -> None:
@@ -30,4 +33,7 @@ def test_broker_owns_the_only_host_command_workspace_mount() -> None:
     assert (
         "ReadWritePaths=/var/lib/lunar-agent/workspaces "
         "/run/lunar-agent-command-broker"
+    ) in broker_unit
+    assert (
+        "Environment=PYTHONPATH=/opt/lunar-agent-command-broker/current/src"
     ) in broker_unit
