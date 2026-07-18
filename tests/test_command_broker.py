@@ -564,6 +564,42 @@ def test_command_broker_client_disconnect_kills_and_reaps_the_process_group(
         os.kill(pid, 0)
 
 
+def test_command_broker_audits_disconnect_without_raw_identifiers(monkeypatch):
+    audit_events = []
+
+    async def disconnect(_request, _operation):
+        if hasattr(_operation, "close"):
+            _operation.close()
+        raise command_broker._CommandClientDisconnected
+
+    monkeypatch.setattr(
+        command_broker,
+        "_run_until_client_disconnect",
+        disconnect,
+    )
+    monkeypatch.setattr(
+        command_broker.audit_logger,
+        "info",
+        lambda *args: audit_events.append(args),
+    )
+    request = command_broker.CommandRequest(
+        workspaceId=WORKSPACE_ID,
+        command="private-command-marker",
+        timeoutSeconds=5,
+    )
+
+    with pytest.raises(command_broker.HTTPException) as exc_info:
+        asyncio.run(command_broker.run_command(request, object()))
+
+    assert exc_info.value.status_code == 499
+    assert exc_info.value.detail == "Command request was cancelled"
+    assert len(audit_events) == 1
+    logged = str(audit_events[0])
+    assert "cancelled after client disconnect" in logged
+    assert WORKSPACE_ID not in logged
+    assert "private-command-marker" not in logged
+
+
 def test_command_broker_disconnect_while_queued_never_launches_command(
     tmp_path,
     monkeypatch,

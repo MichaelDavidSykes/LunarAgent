@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 
 logger = logging.getLogger(__name__)
+audit_logger = logging.getLogger("uvicorn.error")
 app = FastAPI(title="LunarAgent command broker", docs_url=None, redoc_url=None)
 
 _WORKSPACE_ID = re.compile(r"^[a-f0-9]{24}$")
@@ -317,7 +318,7 @@ async def _cleanup_stale_workspaces(*, force: bool = False) -> int:
                     hashlib.sha256(cleanup_path.name.encode()).hexdigest()[:12],
                 )
         if removed:
-            logger.info("Removed stale command workspaces count=%s", removed)
+            audit_logger.info("Removed stale command workspaces count=%s", removed)
         return removed
 
 
@@ -666,7 +667,7 @@ async def run_command(
             _execute_command(request),
         )
     except _CommandClientDisconnected as exc:
-        logger.info(
+        audit_logger.info(
             "Workspace command cancelled after client disconnect workspace=%s command=%s duration_ms=%s",
             workspace_fingerprint,
             command_fingerprint,
@@ -689,7 +690,7 @@ async def run_command(
             status_code=503,
             detail="Command sandbox is unavailable",
         ) from exc
-    logger.info(
+    audit_logger.info(
         "Workspace command completed workspace=%s command=%s status=%s exit_code=%s duration_ms=%s",
         workspace_fingerprint,
         command_fingerprint,
