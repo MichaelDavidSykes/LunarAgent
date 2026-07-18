@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { Codex } from "@openai/codex-sdk";
+import { safeToolError, timingFor } from "./runtime_events.mjs";
 
 const MAX_TEXT = 8000;
 
@@ -332,6 +333,8 @@ async function main() {
   let finalText = "";
   const commandOutputLengths = new Map();
   const agentTextLengths = new Map();
+  const itemTimings = new Map();
+  let turnStartedAt = Date.now();
 
   for await (const sdkEvent of streamed.events) {
     if (sdkEvent.type === "thread.started") {
@@ -343,9 +346,12 @@ async function main() {
       continue;
     }
     if (sdkEvent.type === "turn.started") {
+      turnStartedAt = Date.now();
       event("tool.progress", {
         phase: "reasoning",
         message: `${String(input.reasoningEffort || "medium")} reasoning started with live graph and research tools available.`,
+        startedAt: new Date(turnStartedAt).toISOString(),
+        durationMs: 0,
       });
       continue;
     }
@@ -354,6 +360,7 @@ async function main() {
         summary: "Investigation complete.",
         steps: [{ label: "Synthesize grounded answer", status: "completed" }],
         usage: safeValue(sdkEvent.usage),
+        durationMs: Math.max(0, Date.now() - turnStartedAt),
       });
       continue;
     }
@@ -373,11 +380,13 @@ async function main() {
         })),
       });
     } else if (item.type === "web_search") {
-      event(stage === "completed" ? "tool.completed" : "tool.started", {
+      event(stage === "completed" ? "tool.completed" : stage === "updated" ? "tool.progress" : "tool.started", {
         tool: "web_search",
         label: "Live web research",
         query: bounded(item.query, 500),
         status: stage,
+        ...timingFor(itemTimings, item.id, stage),
+        ...safeToolError(item, "Live web research failed."),
       });
     } else if (item.type === "mcp_tool_call") {
       event(stage === "completed" ? "tool.completed" : stage === "updated" ? "tool.progress" : "tool.started", {
@@ -386,8 +395,9 @@ async function main() {
         label: `LunarGraph · ${bounded(item.tool, 120)}`,
         arguments: safeValue(item.arguments),
         result: stage === "completed" ? mappedResult(item) : undefined,
-        error: item.error ? bounded(item.error.message, 500) : undefined,
         status: item.status || stage,
+        ...timingFor(itemTimings, item.id, stage),
+        ...safeToolError(item, "LunarGraph tool execution failed."),
       });
     } else if (item.type === "command_execution") {
       const previousLength = commandOutputLengths.get(item.id) || 0;
@@ -401,6 +411,15 @@ async function main() {
         output: bounded(nextChunk, 6000),
         exitCode: item.exit_code,
         status: item.status || stage,
+        ...timingFor(itemTimings, item.id, stage),
+        ...(stage === "completed" &&
+          Number.isFinite(Number(item.exit_code)) &&
+          Number(item.exit_code) !== 0
+          ? {
+              errorCode: "command_failed",
+              error: "The workspace command did not complete successfully.",
+            }
+          : {}),
       });
     } else if (item.type === "file_change") {
       event("tool.completed", {
@@ -408,6 +427,8 @@ async function main() {
         label: "Workspace files updated",
         changes: safeValue(item.changes),
         status: item.status || stage,
+        ...timingFor(itemTimings, item.id, "completed"),
+        ...safeToolError(item, "Workspace file update failed."),
       });
     } else if (item.type === "reasoning") {
       event("tool.progress", {
