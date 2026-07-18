@@ -153,9 +153,17 @@ async def command_broker_status() -> dict[str, Any]:
             payload = response.json()
     except Exception as exc:
         raise ExplorerCodexRuntimeError("command_sandbox_unavailable") from exc
-    if not isinstance(payload, dict) or payload.get("status") != "ok":
+    if (
+        not isinstance(payload, dict)
+        or payload.get("status") != "ok"
+        or payload.get("verification") != "executable"
+    ):
         raise ExplorerCodexRuntimeError("command_sandbox_unavailable")
-    return {"configured": True, "mode": "isolated-workspace"}
+    return {
+        "configured": True,
+        "mode": "isolated-workspace",
+        "verified": True,
+    }
 
 
 async def _emit_runtime_failure(

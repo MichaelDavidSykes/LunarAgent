@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import signal
 import time
 from pathlib import Path
@@ -22,12 +23,18 @@ _WORKSPACE_ID = re.compile(r"^[a-f0-9]{24}$")
 _MAX_CAPTURE_BYTES = 16_000
 _MAX_STREAM_BYTES = 128_000
 _COMMAND_CONCURRENCY = asyncio.Semaphore(2)
-# The host broker and the authentication-bearing container intentionally share
-# UID 10001 so both can access an opaque session workspace. RLIMIT_NPROC is
-# charged across that UID, including Codex/Node threads. Two active Codex turns
-# can therefore exceed a traditional per-command limit of 64 before Bubblewrap
-# starts. The broker's systemd TasksMax=160 remains the tighter command-service
-# cgroup boundary; this UID-wide limit prevents false namespace failures.
+_HEALTH_PROBE_LOCK = asyncio.Lock()
+_HEALTH_PROBE_TTL_SECONDS = 30.0
+_HEALTH_WORKSPACE_ID = "0" * 24
+_HEALTH_MARKER = "LUNAR_AGENT_COMMAND_SANDBOX_READY"
+_last_health_success_monotonic = 0.0
+# The host broker and authentication-bearing container share UID 10001 for the
+# protected broker socket (the host workspace itself is not container-mounted).
+# RLIMIT_NPROC is charged across that UID, including Codex/Node threads. Two
+# active Codex turns can therefore exceed a traditional per-command limit of 64
+# before Bubblewrap starts. The broker's systemd TasksMax=160 remains the
+# tighter command-service cgroup boundary; this UID-wide limit prevents false
+# namespace failures.
 _COMMAND_NPROC_LIMIT = 256
 _SENSITIVE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
@@ -125,16 +132,44 @@ def _require_token(authorization: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-def _resolve_workspace(workspace_id: str) -> Path:
+def _prepare_workspace(
+    workspace_id: str,
+    *,
+    allow_health_workspace: bool = False,
+) -> Path:
     if not _WORKSPACE_ID.fullmatch(str(workspace_id or "")):
         raise HTTPException(status_code=400, detail="Invalid command workspace")
+    if workspace_id == _HEALTH_WORKSPACE_ID and not allow_health_workspace:
+        raise HTTPException(status_code=400, detail="Invalid command workspace")
     root = _workspace_root()
+    if not root.is_dir():
+        raise HTTPException(status_code=503, detail="Command workspace is unavailable")
     candidate = root / workspace_id
+    try:
+        candidate.mkdir(mode=0o700, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Command workspace is unavailable",
+        ) from exc
     if candidate.is_symlink() or not candidate.is_dir():
-        raise HTTPException(status_code=404, detail="Command workspace is unavailable")
-    resolved = candidate.resolve()
+        raise HTTPException(status_code=400, detail="Invalid command workspace")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Command workspace is unavailable",
+        ) from exc
     if resolved.parent != root:
         raise HTTPException(status_code=400, detail="Invalid command workspace")
+    try:
+        resolved.chmod(0o700)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Command workspace is unavailable",
+        ) from exc
     return resolved
 
 
@@ -296,13 +331,92 @@ async def _run_sandboxed_command(
     )
 
 
+def _health_probe_command() -> str:
+    network_probe = (
+        "import errno,socket,sys\n"
+        "try:\n"
+        "    socket.socket()\n"
+        "except OSError as exc:\n"
+        "    sys.exit(0 if exc.errno == errno.EAFNOSUPPORT else 1)\n"
+        "sys.exit(1)"
+    )
+    return (
+        'test "$PWD" = /workspace'
+        " && test ! -e /codex-auth"
+        " && test ! -e /etc/lunarengine-prefect.env"
+        f" && /usr/bin/python3 -c {shlex.quote(network_probe)}"
+        f" && printf {_HEALTH_MARKER}"
+    )
+
+
+async def _verify_sandbox_execution() -> None:
+    global _last_health_success_monotonic
+
+    now = time.monotonic()
+    if (
+        _last_health_success_monotonic > 0
+        and now - _last_health_success_monotonic < _HEALTH_PROBE_TTL_SECONDS
+    ):
+        return
+    async with _HEALTH_PROBE_LOCK:
+        now = time.monotonic()
+        if (
+            _last_health_success_monotonic > 0
+            and now - _last_health_success_monotonic < _HEALTH_PROBE_TTL_SECONDS
+        ):
+            return
+        workspace = _prepare_workspace(
+            _HEALTH_WORKSPACE_ID,
+            allow_health_workspace=True,
+        )
+        try:
+            async with _COMMAND_CONCURRENCY:
+                result = await _run_sandboxed_command(
+                    workspace,
+                    _health_probe_command(),
+                    5,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Command sandbox executable health probe failed error=%s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Command sandbox is unavailable",
+            ) from exc
+        if (
+            result.status != "completed"
+            or result.exitCode != 0
+            or result.stdout != _HEALTH_MARKER
+            or result.stderr
+        ):
+            logger.warning(
+                "Command sandbox executable health probe rejected status=%s exit_code=%s duration_ms=%s",
+                result.status,
+                result.exitCode,
+                result.durationMs,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Command sandbox is unavailable",
+            )
+        os.utime(workspace, None)
+        _last_health_success_monotonic = time.monotonic()
+
+
 @app.get("/live", dependencies=[Depends(_require_token)])
 async def live() -> dict[str, str]:
     if not _bubblewrap_binary().is_file() or not _prlimit_binary().is_file():
         raise HTTPException(status_code=503, detail="Command sandbox is unavailable")
     if not _workspace_root().is_dir():
         raise HTTPException(status_code=503, detail="Command workspace is unavailable")
-    return {"status": "ok", "sandbox": "bubblewrap"}
+    await _verify_sandbox_execution()
+    return {
+        "status": "ok",
+        "sandbox": "bubblewrap",
+        "verification": "executable",
+    }
 
 
 @app.post(
@@ -311,7 +425,7 @@ async def live() -> dict[str, str]:
     dependencies=[Depends(_require_token)],
 )
 async def run_command(request: CommandRequest) -> CommandResponse:
-    workspace = _resolve_workspace(request.workspaceId)
+    workspace = _prepare_workspace(request.workspaceId)
     command = request.command.strip()
     if not command or "\x00" in command:
         raise HTTPException(status_code=400, detail="Invalid workspace command")
