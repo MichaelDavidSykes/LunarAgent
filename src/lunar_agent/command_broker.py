@@ -13,13 +13,14 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator, Literal
+from typing import AsyncIterator, Awaitable, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 
 logger = logging.getLogger(__name__)
+audit_logger = logging.getLogger("uvicorn.error")
 app = FastAPI(title="LunarAgent command broker", docs_url=None, redoc_url=None)
 
 _WORKSPACE_ID = re.compile(r"^[a-f0-9]{24}$")
@@ -90,6 +91,10 @@ class CommandResponse(BaseModel):
 
 
 class _OutputLimitExceeded(RuntimeError):
+    pass
+
+
+class _CommandClientDisconnected(RuntimeError):
     pass
 
 
@@ -313,7 +318,7 @@ async def _cleanup_stale_workspaces(*, force: bool = False) -> int:
                     hashlib.sha256(cleanup_path.name.encode()).hexdigest()[:12],
                 )
         if removed:
-            logger.info("Removed stale command workspaces count=%s", removed)
+            audit_logger.info("Removed stale command workspaces count=%s", removed)
         return removed
 
 
@@ -516,6 +521,40 @@ async def _run_sandboxed_command(
     )
 
 
+async def _wait_for_client_disconnect(request: Request) -> None:
+    while not await request.is_disconnected():
+        await asyncio.sleep(0.05)
+
+
+async def _run_until_client_disconnect(
+    request: Request,
+    operation: Awaitable[CommandResponse],
+) -> CommandResponse:
+    operation_task = asyncio.create_task(operation)
+    disconnect_task = asyncio.create_task(_wait_for_client_disconnect(request))
+    try:
+        completed, _pending = await asyncio.wait(
+            {operation_task, disconnect_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if operation_task in completed:
+            return await operation_task
+        raise _CommandClientDisconnected
+    finally:
+        if not operation_task.done():
+            operation_task.cancel()
+        await asyncio.gather(operation_task, return_exceptions=True)
+        if not disconnect_task.done():
+            # Starlette's synchronous TestClient receive shim waits for the
+            # response-complete event after consuming the body and may defer
+            # cancellation until this handler returns. Production Uvicorn
+            # receives http.disconnect directly. Never let that monitor delay
+            # a completed command response.
+            disconnect_task.cancel()
+        if disconnect_task.done():
+            await asyncio.gather(disconnect_task, return_exceptions=True)
+
+
 def _health_probe_command() -> str:
     network_probe = (
         "import errno,socket,sys\n"
@@ -612,12 +651,58 @@ async def live() -> dict[str, str]:
     response_model=CommandResponse,
     dependencies=[Depends(_require_token)],
 )
-async def run_command(request: CommandRequest) -> CommandResponse:
+async def run_command(
+    request: CommandRequest,
+    http_request: Request,
+) -> CommandResponse:
     command = request.command.strip()
     if not command or "\x00" in command:
         raise HTTPException(status_code=400, detail="Invalid workspace command")
     command_fingerprint = hashlib.sha256(command.encode()).hexdigest()[:12]
     workspace_fingerprint = hashlib.sha256(request.workspaceId.encode()).hexdigest()[:12]
+    started = time.monotonic()
+    try:
+        result = await _run_until_client_disconnect(
+            http_request,
+            _execute_command(request),
+        )
+    except _CommandClientDisconnected as exc:
+        audit_logger.info(
+            "Workspace command cancelled after client disconnect workspace=%s command=%s duration_ms=%s",
+            workspace_fingerprint,
+            command_fingerprint,
+            int((time.monotonic() - started) * 1_000),
+        )
+        raise HTTPException(
+            status_code=499,
+            detail="Command request was cancelled",
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Workspace command unavailable workspace=%s command=%s error=%s",
+            workspace_fingerprint,
+            command_fingerprint,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Command sandbox is unavailable",
+        ) from exc
+    audit_logger.info(
+        "Workspace command completed workspace=%s command=%s status=%s exit_code=%s duration_ms=%s",
+        workspace_fingerprint,
+        command_fingerprint,
+        result.status,
+        result.exitCode,
+        result.durationMs,
+    )
+    return result
+
+
+async def _execute_command(request: CommandRequest) -> CommandResponse:
+    command = request.command.strip()
     await _cleanup_stale_workspaces()
     started = time.monotonic()
     try:
@@ -640,25 +725,4 @@ async def run_command(request: CommandRequest) -> CommandResponse:
             durationMs=int((time.monotonic() - started) * 1_000),
             stderr="The workspace command exceeded its execution deadline.",
         )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning(
-            "Workspace command unavailable workspace=%s command=%s error=%s",
-            workspace_fingerprint,
-            command_fingerprint,
-            type(exc).__name__,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="Command sandbox is unavailable",
-        ) from exc
-    logger.info(
-        "Workspace command completed workspace=%s command=%s status=%s exit_code=%s duration_ms=%s",
-        workspace_fingerprint,
-        command_fingerprint,
-        result.status,
-        result.exitCode,
-        result.durationMs,
-    )
     return result

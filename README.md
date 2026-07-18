@@ -166,6 +166,16 @@ secrets, and rejection of IP sockets rather than reporting ready from binary
 presence alone.
 The runtime never treats a failed command as verified, and the final response
 receives a deterministic warning if a model attempts to claim otherwise.
+When a Codex turn is stopped, terminating the Agent-side runner closes its
+Unix-socket command request. The broker monitors that request connection across
+queueing and execution; a disconnect cancels and reaps the complete Bubblewrap
+process group instead of allowing a previously started command to continue
+after the Explorer session is cancelled. The Agent starts each Codex runner in
+its own process group and terminates that whole group on cancellation, ensuring
+the MCP client closes its broker request and triggers the same cleanup boundary.
+The MCP bridge also monitors its exact runner process identity and exits if that
+owner disappears, covering SDK child processes that move into a separate process
+group before invoking the broker.
 The broker and Agent container share UID `10001` for the protected broker socket,
 but the host command-workspace root is deliberately not mounted into the Agent
 container. The broker lazily creates the opaque host workspace on the first

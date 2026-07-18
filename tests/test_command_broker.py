@@ -324,21 +324,21 @@ def test_command_broker_serializes_one_workspace_but_runs_two_investigations(
 
     async def exercise() -> None:
         await asyncio.gather(
-            command_broker.run_command(
+            command_broker._execute_command(
                 command_broker.CommandRequest(
                     workspaceId=WORKSPACE_ID,
                     command="first",
                     timeoutSeconds=5,
                 )
             ),
-            command_broker.run_command(
+            command_broker._execute_command(
                 command_broker.CommandRequest(
                     workspaceId=WORKSPACE_ID,
                     command="second",
                     timeoutSeconds=5,
                 )
             ),
-            command_broker.run_command(
+            command_broker._execute_command(
                 command_broker.CommandRequest(
                     workspaceId=second_workspace_id,
                     command="other-investigation",
@@ -382,7 +382,7 @@ def test_command_broker_queue_wait_is_bounded_by_the_request_deadline(
 
     async def exercise() -> tuple[command_broker.CommandResponse, float]:
         first = asyncio.create_task(
-            command_broker.run_command(
+            command_broker._execute_command(
                 command_broker.CommandRequest(
                     workspaceId=WORKSPACE_ID,
                     command="first",
@@ -392,7 +392,7 @@ def test_command_broker_queue_wait_is_bounded_by_the_request_deadline(
         )
         await asyncio.wait_for(first_started.wait(), timeout=1)
         started = time.monotonic()
-        second = await command_broker.run_command(
+        second = await command_broker._execute_command(
             command_broker.CommandRequest(
                 workspaceId=WORKSPACE_ID,
                 command="queued",
@@ -512,6 +512,149 @@ def test_command_broker_cancellation_kills_and_reaps_the_process_group(
     pid = asyncio.run(exercise())
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+def test_command_broker_client_disconnect_kills_and_reaps_the_process_group(
+    tmp_path,
+    monkeypatch,
+):
+    _client, workspace = _configure_broker(tmp_path, monkeypatch)
+    pid_file = tmp_path / "disconnected-command.pid"
+    disconnected = asyncio.Event()
+    script = (
+        "import os,pathlib,sys,time\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8')\n"
+        "time.sleep(30)\n"
+    )
+    monkeypatch.setattr(
+        command_broker,
+        "_sandbox_argv",
+        lambda _workspace, _command, _timeout: [
+            sys.executable,
+            "-c",
+            script,
+            str(pid_file),
+        ],
+    )
+
+    class DisconnectingRequest:
+        async def is_disconnected(self) -> bool:
+            return disconnected.is_set()
+
+    async def exercise() -> int:
+        task = asyncio.create_task(
+            command_broker._run_until_client_disconnect(
+                DisconnectingRequest(),
+                command_broker._run_sandboxed_command(workspace, "wait", 20),
+            )
+        )
+        for _attempt in range(100):
+            if pid_file.is_file():
+                break
+            await asyncio.sleep(0.01)
+        assert pid_file.is_file()
+        pid = int(pid_file.read_text(encoding="utf-8"))
+        disconnected.set()
+        with pytest.raises(command_broker._CommandClientDisconnected):
+            await asyncio.wait_for(task, timeout=2)
+        return pid
+
+    pid = asyncio.run(exercise())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_command_broker_audits_disconnect_without_raw_identifiers(monkeypatch):
+    audit_events = []
+
+    async def disconnect(_request, _operation):
+        if hasattr(_operation, "close"):
+            _operation.close()
+        raise command_broker._CommandClientDisconnected
+
+    monkeypatch.setattr(
+        command_broker,
+        "_run_until_client_disconnect",
+        disconnect,
+    )
+    monkeypatch.setattr(
+        command_broker.audit_logger,
+        "info",
+        lambda *args: audit_events.append(args),
+    )
+    request = command_broker.CommandRequest(
+        workspaceId=WORKSPACE_ID,
+        command="private-command-marker",
+        timeoutSeconds=5,
+    )
+
+    with pytest.raises(command_broker.HTTPException) as exc_info:
+        asyncio.run(command_broker.run_command(request, object()))
+
+    assert exc_info.value.status_code == 499
+    assert exc_info.value.detail == "Command request was cancelled"
+    assert len(audit_events) == 1
+    logged = str(audit_events[0])
+    assert "cancelled after client disconnect" in logged
+    assert WORKSPACE_ID not in logged
+    assert "private-command-marker" not in logged
+
+
+def test_command_broker_disconnect_while_queued_never_launches_command(
+    tmp_path,
+    monkeypatch,
+):
+    _client, _workspace = _configure_broker(tmp_path, monkeypatch)
+    disconnected = asyncio.Event()
+    calls: list[str] = []
+
+    async def fake_run(workspace, command, timeout_seconds):
+        calls.append(command)
+        return command_broker.CommandResponse(
+            status="completed",
+            exitCode=0,
+            stdout=command,
+            durationMs=1,
+        )
+
+    monkeypatch.setattr(command_broker, "_run_sandboxed_command", fake_run)
+
+    class DisconnectingRequest:
+        async def is_disconnected(self) -> bool:
+            return disconnected.is_set()
+
+    async def exercise() -> None:
+        await command_broker._COMMAND_CONCURRENCY.acquire()
+        await command_broker._COMMAND_CONCURRENCY.acquire()
+        try:
+            task = asyncio.create_task(
+                command_broker._run_until_client_disconnect(
+                    DisconnectingRequest(),
+                    command_broker._execute_command(
+                        command_broker.CommandRequest(
+                            workspaceId=WORKSPACE_ID,
+                            command="must-not-launch",
+                            timeoutSeconds=5,
+                        )
+                    ),
+                )
+            )
+            for _attempt in range(100):
+                if command_broker._workspace_states:
+                    break
+                await asyncio.sleep(0.01)
+            assert command_broker._workspace_states
+            disconnected.set()
+            with pytest.raises(command_broker._CommandClientDisconnected):
+                await asyncio.wait_for(task, timeout=2)
+        finally:
+            command_broker._COMMAND_CONCURRENCY.release()
+            command_broker._COMMAND_CONCURRENCY.release()
+
+    asyncio.run(exercise())
+
+    assert calls == []
+    assert command_broker._workspace_states == {}
 
 
 def test_command_broker_removes_only_inactive_expired_workspaces(

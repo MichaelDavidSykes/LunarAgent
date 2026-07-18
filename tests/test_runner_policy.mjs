@@ -1,11 +1,23 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs";
 import test from "node:test";
+import { monitorRunnerLifetime } from "../codex_runtime/runner_owner.mjs";
 
 const runner = fs.readFileSync(
   new URL("../codex_runtime/runner.mjs", import.meta.url),
   "utf8",
 );
+const mcpPath = new URL(
+  "../codex_runtime/lunar_graph_mcp.mjs",
+  import.meta.url,
+);
+const mcpRuntime = fs.readFileSync(mcpPath, "utf8");
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
 
 test("Explorer actions require current-turn user intent and separate approval", () => {
   assert.match(runner, /Treat action execution as a separate user-approved step/);
@@ -47,6 +59,47 @@ test("workspace commands use the isolated broker and cannot claim failed executi
   assert.match(runner, /No command output was verified for this turn/);
   assert.match(runner, /commandSuccesses/);
   assert.match(runner, /commandFailures/);
+});
+
+test("MCP bridge exits when its owning runner disappears", async (context) => {
+  assert.match(runner, /LUNAR_AGENT_RUNNER_PID: String\(process\.pid\)/);
+  assert.match(mcpRuntime, /monitorRunnerLifetime/);
+  assert.match(mcpRuntime, /shutdownWithRunner/);
+
+  const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+  });
+  await once(owner, "spawn");
+  let resolveOwnerExit;
+  const ownerExit = new Promise((resolve) => {
+    resolveOwnerExit = resolve;
+  });
+  const stopMonitor = monitorRunnerLifetime({
+    runnerPid: owner.pid,
+    intervalMs: 20,
+    onOwnerExit: resolveOwnerExit,
+  });
+  context.after(() => {
+    stopMonitor();
+    owner.kill("SIGKILL");
+  });
+
+  await delay(50);
+  owner.kill("SIGKILL");
+  let timeout;
+  try {
+    await Promise.race([
+      ownerExit,
+      new Promise((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("Runner owner monitor did not detect termination")),
+          2000,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
 });
 
 test("citations require completed research or exact tool-result URL evidence", () => {

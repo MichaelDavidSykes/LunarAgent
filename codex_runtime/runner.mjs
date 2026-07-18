@@ -5,6 +5,7 @@ import {
   collectCitationEvidenceUrls,
   normalizeStructuredResult,
 } from "./output_guardrails.mjs";
+import { processStartTicks } from "./runner_owner.mjs";
 import { safeToolError, timingFor } from "./runtime_events.mjs";
 import { redactSensitiveTextWithCount } from "./sensitive_text.mjs";
 
@@ -314,6 +315,8 @@ async function main() {
             LUNAR_COMMAND_BROKER_SOCKET: input.commandBrokerSocket,
             LUNAR_COMMAND_BROKER_TOKEN: input.commandBrokerToken,
             LUNAR_COMMAND_WORKSPACE_ID: input.commandWorkspaceId,
+            LUNAR_AGENT_RUNNER_PID: String(process.pid),
+            LUNAR_AGENT_RUNNER_START_TICKS: processStartTicks(process.pid),
           },
           startup_timeout_sec: 15,
           tool_timeout_sec: 70,
