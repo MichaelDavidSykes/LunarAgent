@@ -32,7 +32,10 @@ ProtectHostname=yes
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
 RestrictRealtime=yes
 LockPersonality=yes
-CapabilityBoundingSet=
+# The broker process remains an unprivileged user with no ambient capability.
+# Retaining CAP_NET_ADMIN only in the bounding set lets Bubblewrap configure
+# loopback inside its newly created user/network namespace.
+CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=
 ReadWritePaths=/var/lib/lunar-agent/workspaces /run/lunar-agent-command-broker
 MemoryMax=512M
