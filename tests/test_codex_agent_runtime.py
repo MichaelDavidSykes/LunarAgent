@@ -4,15 +4,18 @@ import asyncio
 
 import pytest
 
-from lunar_agent import home_agent as home_module
-from lunar_agent.models import HomeAgentRespondRequest
+from lunar_agent import codex_agent as codex_module
+from lunar_agent.models import ExplorerAgentRespondRequest
 
 
-def _request() -> HomeAgentRespondRequest:
-    return HomeAgentRespondRequest(
-        threadId="home-thread-1",
-        turnId="turn-1",
+def _request() -> ExplorerAgentRespondRequest:
+    return ExplorerAgentRespondRequest(
+        sessionId="explorer-session-1",
+        requestId="turn-0001",
         clientId="client-1",
+        queryPreview="Current Explorer scope",
+        queryContext={},
+        querySummary={},
         currentUserMessage="Investigate Acme",
         selectedEntities=[
             {
@@ -26,19 +29,20 @@ def _request() -> HomeAgentRespondRequest:
     )
 
 
-def test_home_agent_request_accepts_backend_graph_ref_shape():
+def test_explorer_agent_request_accepts_backend_graph_ref_shape():
     request = _request()
 
     assert request.selectedEntities[0].graph_ref == "nodes_vertex_collection/acme"
 
 
-def test_home_agent_request_rejects_oversized_message():
+def test_explorer_agent_request_rejects_oversized_message():
     with pytest.raises(ValueError):
-        HomeAgentRespondRequest(
-            threadId="home-thread-1",
-            turnId="turn-1",
+        ExplorerAgentRespondRequest(
+            sessionId="explorer-session-1",
+            requestId="turn-0001",
             clientId="client-1",
-            currentUserMessage="word " * 901,
+            queryPreview="Current Explorer scope",
+            currentUserMessage="word " * 1201,
         )
 
 
@@ -48,8 +52,8 @@ def test_project_root_uses_deployed_application_root(tmp_path, monkeypatch):
     (runtime / "runner.mjs").write_text("// deployed runner", encoding="utf-8")
     monkeypatch.setenv("LUNAR_AGENT_APP_ROOT", str(tmp_path))
 
-    assert home_module._project_root() == tmp_path.resolve()
-    assert home_module._runner_path() == runtime / "runner.mjs"
+    assert codex_module._project_root() == tmp_path.resolve()
+    assert codex_module._runner_path() == runtime / "runner.mjs"
 
 
 def test_runtime_streams_events_and_keeps_service_secrets_out_of_child_env(
@@ -76,6 +80,8 @@ process.stdout.write(JSON.stringify({
   codexThreadId: "codex-1",
   model: payload.model,
   finalResponse: "Grounded result",
+  actions: [],
+  followUps: [],
   entities: [{id: "acme", type: "company", label: "Acme"}],
   citations: []
 }) + "\\n");
@@ -84,10 +90,10 @@ process.stdout.write(JSON.stringify({
     )
     mcp = tmp_path / "fake-mcp.mjs"
     mcp.write_text("// exists for runtime validation", encoding="utf-8")
-    monkeypatch.setattr(home_module, "_runner_path", lambda: runner)
-    monkeypatch.setattr(home_module, "_mcp_server_path", lambda: mcp)
-    monkeypatch.setattr(home_module.settings, "home_agent_workspace_root", str(tmp_path / "work"))
-    monkeypatch.setattr(home_module.settings, "backend_shared_token", "must-not-leak")
+    monkeypatch.setattr(codex_module, "_runner_path", lambda: runner)
+    monkeypatch.setattr(codex_module, "_mcp_server_path", lambda: mcp)
+    monkeypatch.setattr(codex_module.settings, "codex_agent_workspace_root", str(tmp_path / "work"))
+    monkeypatch.setattr(codex_module.settings, "backend_shared_token", "must-not-leak")
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
     monkeypatch.setenv("LUNAR_AGENT_BACKEND_SHARED_TOKEN", "must-not-leak")
     events = []
@@ -95,22 +101,22 @@ process.stdout.write(JSON.stringify({
     async def bootstrap(_request):
         return {
             "token": "delegated-read-only-token",
-            "toolsUrl": "https://backend.example.test/api/v1/home/tools",
+            "toolsUrl": "https://backend.example.test/api/v1/graph/ai-agent/codex-tools",
         }
 
     async def sink(event_type, data):
         events.append((event_type, data))
 
     response = asyncio.run(
-        home_module.run_home_agent_turn(
+        codex_module.run_explorer_codex_turn(
             _request(),
             graph_bootstrap=bootstrap,
             event_sink=sink,
         )
     )
 
-    assert response.final_response == "Grounded result"
-    assert response.codex_thread_id == "codex-1"
+    assert response.reply == "Grounded result"
+    assert response.codexThreadId == "codex-1"
     assert response.entities[0]["label"] == "Acme"
     assert events == [
         (
@@ -131,22 +137,24 @@ def test_runtime_rejects_incomplete_graph_bootstrap(tmp_path, monkeypatch):
     runner.write_text("", encoding="utf-8")
     mcp = tmp_path / "fake-mcp.mjs"
     mcp.write_text("", encoding="utf-8")
-    monkeypatch.setattr(home_module, "_runner_path", lambda: runner)
-    monkeypatch.setattr(home_module, "_mcp_server_path", lambda: mcp)
+    monkeypatch.setattr(codex_module, "_runner_path", lambda: runner)
+    monkeypatch.setattr(codex_module, "_mcp_server_path", lambda: mcp)
 
     async def bootstrap(_request):
         return {"token": "", "toolsUrl": ""}
 
     with pytest.raises(RuntimeError, match="tool session"):
-        asyncio.run(home_module.run_home_agent_turn(_request(), graph_bootstrap=bootstrap))
+        asyncio.run(codex_module.run_explorer_codex_turn(_request(), graph_bootstrap=bootstrap))
 
 
 def test_runtime_cancellation_terminates_node_process(tmp_path, monkeypatch):
     runner = tmp_path / "waiting-runner.mjs"
+    ready = tmp_path / "ready.txt"
     stopped = tmp_path / "stopped.txt"
     runner.write_text(
         f"""
 import fs from "node:fs";
+fs.writeFileSync({str(ready)!r}, "ready");
 process.once("SIGTERM", () => {{
   fs.writeFileSync({str(stopped)!r}, "stopped");
   process.exit(0);
@@ -157,21 +165,25 @@ setInterval(() => {{}}, 1000);
     )
     mcp = tmp_path / "fake-mcp.mjs"
     mcp.write_text("// exists for runtime validation", encoding="utf-8")
-    monkeypatch.setattr(home_module, "_runner_path", lambda: runner)
-    monkeypatch.setattr(home_module, "_mcp_server_path", lambda: mcp)
-    monkeypatch.setattr(home_module.settings, "home_agent_workspace_root", str(tmp_path / "work"))
+    monkeypatch.setattr(codex_module, "_runner_path", lambda: runner)
+    monkeypatch.setattr(codex_module, "_mcp_server_path", lambda: mcp)
+    monkeypatch.setattr(codex_module.settings, "codex_agent_workspace_root", str(tmp_path / "work"))
 
     async def bootstrap(_request):
         return {
             "token": "delegated-read-only-token",
-            "toolsUrl": "https://backend.example.test/api/v1/home/tools",
+            "toolsUrl": "https://backend.example.test/api/v1/graph/ai-agent/codex-tools",
         }
 
     async def scenario():
         task = asyncio.create_task(
-            home_module.run_home_agent_turn(_request(), graph_bootstrap=bootstrap)
+            codex_module.run_explorer_codex_turn(_request(), graph_bootstrap=bootstrap)
         )
-        await asyncio.sleep(0.15)
+        for _ in range(100):
+            if ready.exists():
+                break
+            await asyncio.sleep(0.02)
+        assert ready.exists()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

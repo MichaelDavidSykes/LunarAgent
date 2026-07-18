@@ -1,14 +1,14 @@
 # LunarAgent
 
-`LunarAgent` is the dedicated reasoning service for Explorer AI mode and the
-AI-first Lunar Home experience.
+`LunarAgent` is the dedicated reasoning and research service embedded in
+LunarChain Explorer.
 
 The current design keeps responsibilities separated:
 
 - `LunarSurfaceBackend` handles auth, Explorer query execution, and session state.
-- `LunarAgent` receives the current Explorer session id, scoped summary, and conversation history.
-- `LunarAgent` can call bounded internal backend tools to inspect scoped reports before answering.
-- For broad or current-events questions, `LunarAgent` first checks LunarGraph and can then use OpenAI web search to add public web context.
+- `LunarAgent` receives the current Explorer session, selected entities, scoped summary, and conversation history.
+- `LunarAgent` uses bounded internal backend tools to inspect the intelligence graph before answering.
+- For broad or current questions, `LunarAgent` can combine graph evidence with live public-web research.
 - `LunarAgent` returns:
   - `reply`
   - `actions`
@@ -16,11 +16,11 @@ The current design keeps responsibilities separated:
 
 This keeps auth and graph access in the backend while still letting the agent do report-level reasoning.
 
-## Lunar Home Codex runtime
+## Explorer Codex runtime
 
-`POST /v1/home-agent/respond` runs a persistent Codex SDK thread using
+`POST /v1/explorer-agent/respond` runs a persistent Codex SDK thread using
 ChatGPT-managed Codex authentication rather than `OPENAI_API_KEY` billing.
-The runtime is configured for `gpt-5.6-sol` with `ultra` reasoning, live web
+The runtime is configured for `gpt-5.6-sol` with `medium` reasoning, live web
 research, workspace-scoped command execution, and the LunarGraph MCP bridge.
 
 Security boundaries:
@@ -37,8 +37,8 @@ Security boundaries:
   raw chain-of-thought removed;
 - consequential external actions are not enabled.
 
-The response includes Markdown, grounded clickable entities, citations, the
-Codex thread id for follow-up turns, and model metadata.
+The response includes Markdown, Explorer actions, grounded clickable entities,
+citations, follow-up prompts, the Codex thread id, and model metadata.
 
 ## API
 
@@ -57,6 +57,9 @@ Input:
 ```json
 {
   "sessionId": "optional-backend-session-id",
+  "requestId": "per-turn-idempotency-id",
+  "codexThreadId": "optional-persistent-codex-thread-id",
+  "clientId": "workspace-id",
   "conversationHistory": [
     { "role": "assistant", "content": "..." },
     { "role": "user", "content": "..." }
@@ -64,23 +67,8 @@ Input:
   "queryPreview": "Active Explorer query",
   "queryContext": {},
   "querySummary": {},
-  "currentUserMessage": "Which actors matter most here?"
-}
-```
-
-### `POST /v1/home-agent/respond`
-
-Input:
-
-```json
-{
-  "threadId": "home-thread-id",
-  "turnId": "turn-id",
-  "codexThreadId": null,
-  "clientId": "workspace-id",
-  "currentUserMessage": "Investigate this supplier and its network.",
+  "currentUserMessage": "Which actors matter most here?",
   "selectedEntities": [],
-  "conversationHistory": []
 }
 ```
 
@@ -88,33 +76,20 @@ Output:
 
 ```json
 {
-  "final_response": "grounded Markdown answer",
-  "codex_thread_id": "persistent-codex-thread-id",
+  "reply": "grounded Markdown answer",
+  "codexThreadId": "persistent-codex-thread-id",
   "model": "gpt-5.6-sol",
+  "actions": [],
+  "followUps": [],
   "entities": [],
   "citations": []
 }
 ```
 
-`GET /v1/home-agent/health` verifies the Home runtime, backend bridge, and
+`GET /v1/explorer-agent/health` verifies the Explorer runtime, backend bridge, and
 mounted ChatGPT-managed Codex authentication.
 
-Output:
-
-```json
-{
-  "reply": "markdown answer",
-  "actions": [],
-  "followUps": [],
-  "model": "gpt-5"
-}
-```
-
 ## Environment
-
-Required:
-
-- `OPENAI_API_KEY`
 
 Optional:
 
@@ -139,20 +114,21 @@ Optional:
 - `LUNAR_AGENT_AREA_RISK_MAX_EVIDENCE_ITEMS` (default `12`)
 - `LUNAR_AGENT_AREA_RISK_MAX_ZONES` (default `6`)
 - `LUNAR_AGENT_AREA_RISK_FALLBACK_ON_EMPTY_WEB` (default `false`, avoids a second model call when web research returns no named zones)
-- `LUNAR_HOME_AGENT_ENABLED` (default `true`)
-- `LUNAR_HOME_AGENT_MODEL` (default `gpt-5.6-sol`)
-- `LUNAR_HOME_AGENT_REASONING_EFFORT` (default `ultra`)
-- `LUNAR_HOME_AGENT_TIMEOUT` (default `900`)
-- `LUNAR_HOME_AGENT_MAX_CONCURRENT_REQUESTS` (default `2`)
-- `LUNAR_HOME_AGENT_WORKSPACE_ROOT` (default `/tmp/lunar-home-workspaces`)
+- `LUNAR_AGENT_CODEX_ENABLED` (default `true`)
+- `LUNAR_AGENT_CODEX_MODEL` (default `gpt-5.6-sol`)
+- `LUNAR_AGENT_CODEX_REASONING_EFFORT` (default `medium`)
+- `LUNAR_AGENT_CODEX_TIMEOUT` (default `900`)
+- `LUNAR_AGENT_CODEX_MAX_CONCURRENT_REQUESTS` (default `2`)
+- `LUNAR_AGENT_CODEX_WORKSPACE_ROOT` (default `/tmp/lunar-agent-workspaces`)
 - `CODEX_HOME` (default and production value `/codex-auth`)
 - `LUNAR_AGENT_APP_ROOT` (production image value `/app`)
 - `CODEX_CLI_PATH` (optional bundled CLI override)
 - `CODEX_NODE_BINARY` (default `node`)
 
-The existing Explorer routes still require `OPENAI_API_KEY`. Lunar Home does
-not pass that key to Codex and uses the ChatGPT-managed auth mounted at
-`CODEX_HOME`.
+The Explorer LunarAgent endpoint does not pass `OPENAI_API_KEY` to Codex and
+uses the ChatGPT-managed authentication mounted at `CODEX_HOME`. The separate
+legacy SafeRoute area-risk endpoint still requires `OPENAI_API_KEY`; that key is
+not used for Explorer LunarAgent turns.
 
 Callers must send the configured `LUNAR_AGENT_SHARED_TOKEN`:
 

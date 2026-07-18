@@ -13,16 +13,17 @@ def _authenticated_client(monkeypatch):
 
 
 def test_explorer_agent_endpoint_hides_internal_error_detail(monkeypatch):
-    async def fail_respond(**_kwargs):
+    async def fail_respond(_request):
         raise RuntimeError("openai-provider-secret-token")
 
-    monkeypatch.setattr(main_module, "respond", fail_respond)
+    monkeypatch.setattr(main_module, "run_explorer_codex_turn", fail_respond)
     client = _authenticated_client(monkeypatch)
 
     response = client.post(
         "/v1/explorer-agent/respond",
         json={
             "sessionId": "session-1",
+            "requestId": "turn-0001",
             "allowUiActions": False,
             "conversationHistory": [],
             "queryPreview": "FOR doc IN reports RETURN doc",
@@ -48,6 +49,7 @@ def test_area_risk_endpoint_hides_internal_error_detail(monkeypatch):
         "/v1/safe-route/area-risk/research",
         json={
             "sessionId": "session-1",
+            "requestId": "turn-0001",
             "aoi": {"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
             "evidence": [],
             "maxZones": 8,
@@ -151,25 +153,31 @@ def test_health_fails_when_runtime_dependencies_are_missing(monkeypatch):
     assert TestClient(main_module.app).get("/live").status_code == 200
 
 
-def test_home_agent_endpoint_uses_codex_runtime_without_exposing_errors(monkeypatch):
-    async def fake_home_turn(request):
-        assert request.threadId == "home-thread-1"
+def test_explorer_agent_endpoint_uses_codex_runtime(monkeypatch):
+    async def fake_codex_turn(request):
+        assert request.sessionId == "explorer-session-1"
+        assert request.requestId == "turn-0001"
         return {
-            "final_response": "Investigated",
-            "codex_thread_id": "codex-thread-1",
+            "reply": "Investigated",
+            "codexThreadId": "codex-thread-1",
             "model": "gpt-5.6-sol",
+            "actions": [],
+            "followUps": [],
             "entities": [],
             "citations": [],
         }
 
-    monkeypatch.setattr(main_module, "run_home_agent_turn", fake_home_turn)
+    monkeypatch.setattr(main_module, "run_explorer_codex_turn", fake_codex_turn)
     client = _authenticated_client(monkeypatch)
     response = client.post(
-        "/v1/home-agent/respond",
+        "/v1/explorer-agent/respond",
         json={
-            "threadId": "home-thread-1",
-            "turnId": "turn-1",
+            "sessionId": "explorer-session-1",
+            "requestId": "turn-0001",
             "clientId": "client-1",
+            "queryPreview": "Current Explorer scope",
+            "queryContext": {},
+            "querySummary": {},
             "currentUserMessage": "Investigate Acme",
             "selectedEntities": [],
             "conversationHistory": [],
@@ -177,26 +185,29 @@ def test_home_agent_endpoint_uses_codex_runtime_without_exposing_errors(monkeypa
     )
 
     assert response.status_code == 200
-    assert response.json()["final_response"] == "Investigated"
+    assert response.json()["reply"] == "Investigated"
     assert response.json()["model"] == "gpt-5.6-sol"
 
 
-def test_home_agent_endpoint_hides_codex_failure_detail(monkeypatch):
-    async def fail_home_turn(_request):
+def test_explorer_agent_endpoint_hides_codex_failure_detail(monkeypatch):
+    async def fail_codex_turn(_request):
         raise RuntimeError("chatgpt-auth-secret")
 
-    monkeypatch.setattr(main_module, "run_home_agent_turn", fail_home_turn)
+    monkeypatch.setattr(main_module, "run_explorer_codex_turn", fail_codex_turn)
     client = _authenticated_client(monkeypatch)
     response = client.post(
-        "/v1/home-agent/respond",
+        "/v1/explorer-agent/respond",
         json={
-            "threadId": "home-thread-1",
-            "turnId": "turn-1",
+            "sessionId": "explorer-session-1",
+            "requestId": "turn-0001",
             "clientId": "client-1",
+            "queryPreview": "Current Explorer scope",
+            "queryContext": {},
+            "querySummary": {},
             "currentUserMessage": "Investigate Acme",
         },
     )
 
     assert response.status_code == 500
-    assert response.json() == {"detail": "Home Agent response failed."}
+    assert response.json() == {"detail": "Explorer agent response failed."}
     assert "chatgpt-auth-secret" not in response.text
