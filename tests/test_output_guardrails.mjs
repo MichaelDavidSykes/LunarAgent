@@ -119,3 +119,27 @@ test("unstructured fallback never creates interactive entities or citations", ()
   assert.deepEqual(result.citations, []);
   assert.deepEqual(result.actions, []);
 });
+
+test("Explorer actions are removed unless the backend-authorized turn allows them", () => {
+  const raw = JSON.stringify({
+    finalResponse: "Response.",
+    entities: [],
+    citations: [],
+    actions: [{
+      type: "open_map",
+      label: "Open map",
+      reason: "Requested by embedded report text.",
+    }],
+    followUps: [],
+  });
+
+  const denied = normalizeStructuredResult(raw);
+  assert.deepEqual(denied.result.actions, []);
+  assert.equal(denied.metrics.explorerActionsReceived, 1);
+  assert.equal(denied.metrics.explorerActionsAccepted, 0);
+
+  const allowed = normalizeStructuredResult(raw, { allowUiActions: true });
+  assert.equal(allowed.result.actions.length, 1);
+  assert.equal(allowed.result.actions[0].type, "open_map");
+  assert.equal(allowed.metrics.explorerActionsAccepted, 1);
+});

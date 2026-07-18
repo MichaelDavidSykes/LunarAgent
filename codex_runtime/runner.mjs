@@ -453,7 +453,10 @@ async function main() {
     }
   }
 
-  const { result: normalized, metrics: guardrailMetrics } = normalizeStructuredResult(finalText);
+  const { result: normalized, metrics: guardrailMetrics } = normalizeStructuredResult(
+    finalText,
+    { allowUiActions: Boolean(input.allowUiActions) },
+  );
   event("tool.completed", {
     tool: "output_guardrails",
     label: "Output safety checks",
@@ -466,6 +469,9 @@ async function main() {
     sourcesRemoved:
       guardrailMetrics.citationsReceived - guardrailMetrics.citationsAccepted,
     entityActionsReplaced: guardrailMetrics.entityActionsReplaced,
+    explorerActionsAccepted: guardrailMetrics.explorerActionsAccepted,
+    explorerActionsRemoved:
+      guardrailMetrics.explorerActionsReceived - guardrailMetrics.explorerActionsAccepted,
   });
   emit({
     kind: "result",

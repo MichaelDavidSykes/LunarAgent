@@ -1,6 +1,15 @@
 const MAX_FINAL_RESPONSE_CHARS = 60000;
 const MAX_ENTITY_ITEMS = 100;
 const MAX_CITATION_ITEMS = 100;
+const ALLOWED_EXPLORER_ACTIONS = new Set([
+  "focus_country",
+  "clear_country_focus",
+  "apply_module_filter",
+  "clear_module_filters",
+  "open_map",
+  "apply_graph_query_scope",
+  "save_and_apply_graph_query_scope",
+]);
 
 function cleanText(value, limit, { singleLine = false } = {}) {
   let text = String(value ?? "")
@@ -154,7 +163,36 @@ function normalizeEntity(candidate) {
   return entity;
 }
 
-export function normalizeStructuredResult(raw) {
+function normalizeExplorerAction(candidate) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+  const type = cleanText(candidate.type, 80, { singleLine: true });
+  const label = cleanText(candidate.label, 120, { singleLine: true });
+  if (!ALLOWED_EXPLORER_ACTIONS.has(type) || !label) return null;
+  return {
+    type,
+    label,
+    reason: cleanText(candidate.reason, 400, { singleLine: true }) || null,
+    countryName: cleanText(candidate.countryName, 160, { singleLine: true }) || null,
+    countryCode:
+      cleanText(candidate.countryCode, 8, { singleLine: true }).toUpperCase() || null,
+    moduleKeys: Array.isArray(candidate.moduleKeys)
+      ? [...new Set(
+          candidate.moduleKeys
+            .map((item) => cleanIdentifier(item, 80))
+            .filter(Boolean),
+        )].slice(0, 20)
+      : [],
+    compiledAql: cleanText(candidate.compiledAql, 20000) || null,
+    queryPreview: cleanText(candidate.queryPreview, 500, { singleLine: true }) || null,
+    savedQueryName: cleanText(candidate.savedQueryName, 240, { singleLine: true }) || null,
+    savedQueryDescription:
+      cleanText(candidate.savedQueryDescription, 1000, { singleLine: true }) || null,
+    alertingEnabled: candidate.alertingEnabled === true,
+    dynamicEndDate: candidate.dynamicEndDate === true,
+  };
+}
+
+export function normalizeStructuredResult(raw, { allowUiActions = false } = {}) {
   let parsed;
   try {
     parsed = JSON.parse(String(raw || ""));
@@ -176,6 +214,8 @@ export function normalizeStructuredResult(raw) {
         citationsReceived: 0,
         citationsAccepted: 0,
         entityActionsReplaced: 0,
+        explorerActionsReceived: 0,
+        explorerActionsAccepted: 0,
       },
     };
   }
@@ -203,13 +243,17 @@ export function normalizeStructuredResult(raw) {
     citationUrls.add(normalized.url);
     citations.push(normalized);
   }
+  const rawActions = Array.isArray(parsed.actions) ? parsed.actions.slice(0, 4) : [];
+  const actions = allowUiActions
+    ? rawActions.map(normalizeExplorerAction).filter(Boolean).slice(0, 4)
+    : [];
 
   return {
     result: {
       finalResponse: cleanText(parsed.finalResponse, MAX_FINAL_RESPONSE_CHARS),
       entities,
       citations,
-      actions: Array.isArray(parsed.actions) ? parsed.actions.slice(0, 4) : [],
+      actions,
       followUps: Array.isArray(parsed.followUps)
         ? parsed.followUps
             .map((item) => cleanText(item, 240, { singleLine: true }))
@@ -223,6 +267,8 @@ export function normalizeStructuredResult(raw) {
       citationsReceived: rawCitations.length,
       citationsAccepted: citations.length,
       entityActionsReplaced: entities.length,
+      explorerActionsReceived: rawActions.length,
+      explorerActionsAccepted: actions.length,
     },
   };
 }
