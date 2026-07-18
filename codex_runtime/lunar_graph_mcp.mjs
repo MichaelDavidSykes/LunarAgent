@@ -4,23 +4,47 @@ import http from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
+import { monitorRunnerLifetime } from "./runner_owner.mjs";
 
 const toolsUrl = String(process.env.LUNAR_GRAPH_TOOLS_URL || "").replace(/\/+$/, "");
 const delegatedToken = String(process.env.LUNAR_GRAPH_DELEGATED_TOKEN || "");
 const commandBrokerSocket = String(process.env.LUNAR_COMMAND_BROKER_SOCKET || "");
 const commandBrokerToken = String(process.env.LUNAR_COMMAND_BROKER_TOKEN || "");
 const commandWorkspaceId = String(process.env.LUNAR_COMMAND_WORKSPACE_ID || "");
+const runnerPid = Number(process.env.LUNAR_AGENT_RUNNER_PID || 0);
+const runnerStartTicks = String(
+  process.env.LUNAR_AGENT_RUNNER_START_TICKS || "",
+).trim();
 
 if (
   !toolsUrl ||
   !delegatedToken ||
   !commandBrokerSocket ||
   !commandBrokerToken ||
+  !Number.isSafeInteger(runnerPid) ||
+  runnerPid <= 1 ||
   !/^[a-f0-9]{24}$/.test(commandWorkspaceId)
 ) {
   console.error("LunarAgent MCP configuration is missing");
   process.exit(1);
 }
+
+let shuttingDown = false;
+function shutdownWithRunner() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  process.exit(0);
+}
+
+monitorRunnerLifetime({
+  runnerPid,
+  runnerStartTicks,
+  onOwnerExit: shutdownWithRunner,
+});
+process.stdin.once("end", shutdownWithRunner);
+process.stdin.once("close", shutdownWithRunner);
+process.once("SIGTERM", shutdownWithRunner);
+process.once("SIGINT", shutdownWithRunner);
 
 const server = new McpServer({
   name: "lunarchain-intelligence-graph",
