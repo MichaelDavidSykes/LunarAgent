@@ -1,0 +1,39 @@
+[Unit]
+Description=LunarAgent isolated workspace command broker
+After=local-fs.target
+Before=lunar-agent.service
+
+[Service]
+Type=simple
+User=lunaragent
+Group=lunaragent
+EnvironmentFile=/etc/lunar-agent-command-broker.env
+WorkingDirectory=/opt/lunar-agent-command-broker/current
+RuntimeDirectory=lunar-agent-command-broker
+RuntimeDirectoryMode=0700
+UMask=0077
+ExecStart=/opt/lunar-agent-command-broker/venv/bin/uvicorn lunar_agent.command_broker:app --uds /run/lunar-agent-command-broker/broker.sock
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/lunar-agent/workspaces /run/lunar-agent-command-broker
+MemoryMax=512M
+TasksMax=160
+
+[Install]
+WantedBy=multi-user.target

@@ -34,6 +34,7 @@ _RETRYABLE_FAILURE_CODES = {
     "codex_usage_limited",
     "graph_bridge_unavailable",
     "graph_tool_rate_limited",
+    "command_sandbox_unavailable",
     "runtime_timeout",
     "runtime_unavailable",
 }
@@ -55,6 +56,9 @@ _SAFE_FAILURE_MESSAGES = {
     ),
     "graph_tool_rate_limited": (
         "The LunarGraph tool bridge is temporarily rate limited. Retry this investigation shortly."
+    ),
+    "command_sandbox_unavailable": (
+        "The isolated workspace command service is temporarily unavailable. Retry this investigation."
     ),
     "runtime_timeout": (
         "The investigation exceeded its secure runtime limit. Narrow the request and retry."
@@ -116,6 +120,8 @@ def _runtime_failure_code(exc: BaseException, stderr: str = "") -> str:
         return "codex_usage_limited"
     if any(marker in text for marker in ("timed out", "timeout", "timeouterror")):
         return "runtime_timeout"
+    if any(marker in text for marker in ("command broker", "command sandbox")):
+        return "command_sandbox_unavailable"
     if any(
         marker in text
         for marker in (
@@ -129,6 +135,27 @@ def _runtime_failure_code(exc: BaseException, stderr: str = "") -> str:
     ):
         return "graph_bridge_unavailable"
     return "runtime_unavailable"
+
+
+async def command_broker_status() -> dict[str, Any]:
+    socket_path = str(settings.command_broker_socket or "").strip()
+    token = str(settings.command_broker_token or "").strip()
+    if not socket_path or not token or not Path(socket_path).is_socket():
+        raise ExplorerCodexRuntimeError("command_sandbox_unavailable")
+    try:
+        transport = httpx.AsyncHTTPTransport(uds=socket_path)
+        async with httpx.AsyncClient(transport=transport, timeout=3.0) as client:
+            response = await client.get(
+                "http://command-broker/live",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        raise ExplorerCodexRuntimeError("command_sandbox_unavailable") from exc
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        raise ExplorerCodexRuntimeError("command_sandbox_unavailable")
+    return {"configured": True, "mode": "isolated-workspace"}
 
 
 async def _emit_runtime_failure(
@@ -317,6 +344,12 @@ async def run_explorer_codex_turn(
         raise RuntimeError("LunarAgent Codex runtime is disabled")
     if not str(request.sessionId or "").strip() or not str(request.requestId or "").strip():
         raise RuntimeError("Explorer session and request identifiers are required")
+    command_broker_socket = str(settings.command_broker_socket or "").strip()
+    command_broker_token = str(settings.command_broker_token or "").strip()
+    if not command_broker_socket or not command_broker_token:
+        code = "command_sandbox_unavailable"
+        await _emit_runtime_failure(sink, code=code, duration_ms=0)
+        raise ExplorerCodexRuntimeError(code)
     runner_path = _runner_path()
     mcp_path = _mcp_server_path()
     if not runner_path.is_file() or not mcp_path.is_file():
@@ -380,6 +413,9 @@ async def run_explorer_codex_turn(
         "mcpServerPath": str(mcp_path),
         "graphToolsUrl": graph_tools_url,
         "graphDelegatedToken": delegated_token,
+        "commandBrokerSocket": command_broker_socket,
+        "commandBrokerToken": command_broker_token,
+        "commandWorkspaceId": workspace.name,
     }
 
     try:

@@ -37,3 +37,14 @@ test("alerting defaults off unless the user explicitly requests it", () => {
     /Set alertingEnabled=true only when the current message explicitly asks to enable alerts; otherwise set it to false/,
   );
 });
+
+test("workspace commands use the isolated broker and cannot claim failed execution", () => {
+  assert.match(runner, /Use the lunarchain_graph run_workspace_command tool for every command/);
+  assert.match(runner, /status=completed and exitCode=0/);
+  assert.match(runner, /commandBrokerSocket/);
+  assert.match(runner, /commandBrokerToken/);
+  assert.match(runner, /commandWorkspaceId/);
+  assert.match(runner, /No command output was verified for this turn/);
+  assert.match(runner, /commandSuccesses/);
+  assert.match(runner, /commandFailures/);
+});

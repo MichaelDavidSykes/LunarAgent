@@ -10,6 +10,20 @@ from lunar_agent import codex_agent as codex_module
 from lunar_agent.models import ExplorerAgentRespondRequest
 
 
+@pytest.fixture(autouse=True)
+def configured_command_broker(monkeypatch):
+    monkeypatch.setattr(
+        codex_module.settings,
+        "command_broker_socket",
+        "/run/lunar-agent-command-broker/broker.sock",
+    )
+    monkeypatch.setattr(
+        codex_module.settings,
+        "command_broker_token",
+        "broker-test-token",
+    )
+
+
 def _request() -> ExplorerAgentRespondRequest:
     return ExplorerAgentRespondRequest(
         sessionId="explorer-session-1",
@@ -74,7 +88,13 @@ process.stdout.write(JSON.stringify({
   data: {
     message: "working",
     leakedOpenAi: Boolean(process.env.OPENAI_API_KEY),
-    leakedBackend: Boolean(process.env.LUNAR_AGENT_BACKEND_SHARED_TOKEN)
+    leakedBackend: Boolean(process.env.LUNAR_AGENT_BACKEND_SHARED_TOKEN),
+    leakedCommandBroker: Boolean(process.env.LUNAR_AGENT_COMMAND_BROKER_TOKEN),
+    commandBrokerConfigured: Boolean(
+      payload.commandBrokerSocket &&
+      payload.commandBrokerToken &&
+      payload.commandWorkspaceId
+    )
   }
 }) + "\\n");
 process.stdout.write(JSON.stringify({
@@ -127,6 +147,8 @@ process.stdout.write(JSON.stringify({
                 "message": "working",
                 "leakedOpenAi": False,
                 "leakedBackend": False,
+                "leakedCommandBroker": False,
+                "commandBrokerConfigured": True,
             },
         )
     ]
@@ -162,6 +184,50 @@ def test_runtime_rejects_incomplete_graph_bootstrap(tmp_path, monkeypatch):
     assert exc_info.value.code == "graph_bridge_unavailable"
     assert events[0][0] == "tool.progress"
     assert events[0][1]["errorCode"] == "graph_bridge_unavailable"
+
+
+def test_runtime_fails_closed_when_command_broker_is_unconfigured(
+    tmp_path,
+    monkeypatch,
+):
+    runner = tmp_path / "fake-runner.mjs"
+    runner.write_text("", encoding="utf-8")
+    mcp = tmp_path / "fake-mcp.mjs"
+    mcp.write_text("", encoding="utf-8")
+    monkeypatch.setattr(codex_module, "_runner_path", lambda: runner)
+    monkeypatch.setattr(codex_module, "_mcp_server_path", lambda: mcp)
+    monkeypatch.setattr(codex_module.settings, "command_broker_token", "")
+    events = []
+
+    async def sink(event_type, data):
+        events.append((event_type, data))
+
+    with pytest.raises(codex_module.ExplorerCodexRuntimeError) as exc_info:
+        asyncio.run(
+            codex_module.run_explorer_codex_turn(
+                _request(),
+                graph_bootstrap=lambda _request: None,
+                event_sink=sink,
+            )
+        )
+
+    assert exc_info.value.code == "command_sandbox_unavailable"
+    assert events == [
+        (
+            "tool.progress",
+            {
+                "phase": "runtime",
+                "status": "failed",
+                "errorCode": "command_sandbox_unavailable",
+                "message": (
+                    "The isolated workspace command service is temporarily unavailable. "
+                    "Retry this investigation."
+                ),
+                "durationMs": 0,
+                "retryable": True,
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(

@@ -157,6 +157,31 @@ def test_health_fails_when_runtime_dependencies_are_missing(monkeypatch):
     assert TestClient(main_module.app).get("/live").status_code == 200
 
 
+def test_explorer_health_requires_isolated_command_sandbox(monkeypatch):
+    async def configured_auth():
+        return {"configured": True, "mode": "chatgpt"}
+
+    async def unavailable_command_broker():
+        raise RuntimeError("broker-private-detail")
+
+    monkeypatch.setattr(main_module.settings, "shared_token", "configured-secret")
+    monkeypatch.setattr(main_module.settings, "codex_agent_enabled", True)
+    monkeypatch.setattr(main_module.settings, "backend_base_url", "https://backend.example.test")
+    monkeypatch.setattr(main_module.settings, "backend_shared_token", "configured-backend-token")
+    monkeypatch.setattr(main_module, "codex_auth_status", configured_auth)
+    monkeypatch.setattr(main_module, "command_broker_status", unavailable_command_broker)
+    client = TestClient(main_module.app)
+
+    response = client.get(
+        "/v1/explorer-agent/health",
+        headers={"Authorization": "Bearer configured-secret"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "LunarAgent command sandbox is unavailable"}
+    assert "broker-private-detail" not in response.text
+
+
 def test_explorer_agent_endpoint_uses_codex_runtime(monkeypatch):
     async def fake_codex_turn(request):
         assert request.sessionId == "explorer-session-1"

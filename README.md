@@ -133,6 +133,23 @@ uses the ChatGPT-managed authentication mounted at `CODEX_HOME`. The separate
 legacy SafeRoute area-risk endpoint still requires `OPENAI_API_KEY`; that key is
 not used for Explorer LunarAgent turns.
 
+Explorer workspace commands do not run inside the authentication-bearing Agent
+container. Codex calls the `run_workspace_command` MCP tool, which reaches a
+token-authenticated Unix-socket broker. The broker executes each command inside
+a fresh Bubblewrap namespace with:
+
+- no network namespace connectivity;
+- only `/usr`, a minimal `/dev` and `/proc`, a private `/tmp`, and the opaque
+  per-session workspace mounted;
+- no Codex home, LunarChain services, environment secrets, host home directory,
+  or tenant data mounts;
+- cleared environment variables, resource limits, concurrency limits, bounded
+  output, a hard deadline, and content-level credential redaction.
+
+The Agent health route fails closed when this command sandbox is unavailable.
+The runtime never treats a failed command as verified, and the final response
+receives a deterministic warning if a model attempts to claim otherwise.
+
 Callers must send the configured `LUNAR_AGENT_SHARED_TOKEN`:
 
 ```http
@@ -148,6 +165,16 @@ pip install -e .
 npm ci
 uvicorn lunar_agent.main:app --reload --port 8310
 ```
+
+The production command broker runs separately as
+`lunar-agent-command-broker.service`; see `deploy/`. It requires Bubblewrap,
+the dedicated unprivileged `lunaragent` account, a root-owned environment file
+containing the broker token, and the shared workspace directory. The Agent
+container receives only the broker socket, broker token, and workspace mount.
+`deploy/lunar-agent.service` preserves the existing read-only, capability-free
+Agent container boundary and adds only those mounts. The broker itself runs as
+the unprivileged host account with systemd hardening and no network address
+family.
 
 ## Backend Wiring
 
@@ -178,12 +205,12 @@ that scoped token, never the long-lived backend token.
 
 Provision Codex authentication interactively on the host and store it outside
 the repository. The systemd unit expects the protected host directory
-`/etc/lunar-agent/codex` to be mounted at `/codex-auth`. This no-dot container
-alias is deliberate: the SDK applies an exact deny-read permission rule to it
-for every model-generated command, while the parent Codex process can still
-authenticate. Set host
-ownership to container UID `10001`, restrict directory permissions, and treat
-`auth.json` like a password. Never commit or print its contents.
+`/etc/lunar-agent/codex` to be mounted at `/codex-auth`. Built-in Codex shell
+execution remains denied from this authentication-bearing container; all
+commands are delegated to the credential-free command broker sandbox described
+above. Set host ownership to container UID `10001`, restrict directory
+permissions, and treat `auth.json` like a password. Never commit or print its
+contents.
 
 If `EXPLORER_AGENT_BASE_URL` or its shared token is unset, the Explorer Agent
 fails closed with `503`; it never falls back to an API-key-backed model path.
