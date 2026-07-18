@@ -187,6 +187,89 @@ export function collectCitationEvidenceUrls(value) {
   return [...urls];
 }
 
+export function collectGraphEntityEvidence(value) {
+  const records = [];
+  const seen = new Set();
+  const visited = new WeakSet();
+  let visitedNodes = 0;
+  const evidenceContainers = new Set([
+    "entities",
+    "highlightiocs",
+    "report",
+    "reports",
+  ]);
+
+  function visit(candidate, path = [], depth = 0) {
+    if (
+      candidate == null ||
+      depth > 7 ||
+      visitedNodes >= 2000 ||
+      records.length >= MAX_ENTITY_ITEMS * 2
+    ) {
+      return;
+    }
+    visitedNodes += 1;
+    if (typeof candidate !== "object") return;
+    if (visited.has(candidate)) return;
+    visited.add(candidate);
+    if (Array.isArray(candidate)) {
+      for (const item of candidate.slice(0, 200)) {
+        visit(item, path, depth + 1);
+      }
+      return;
+    }
+
+    const withinEvidenceContainer = path
+      .map(normalizedFieldName)
+      .some((key) => evidenceContainers.has(key));
+    if (withinEvidenceContainer) {
+      const normalizedPath = path.map(normalizedFieldName);
+      const id = cleanIdentifier(
+        candidate.id ?? candidate.graphRef ?? candidate.graph_ref ?? candidate._id,
+        240,
+      );
+      const label = cleanText(
+        candidate.label ?? candidate.name ?? candidate.value ?? candidate.pattern,
+        240,
+        { singleLine: true },
+      );
+      if (
+        id.startsWith("nodes_vertex_collection/") &&
+        label &&
+        !suspiciousInstructionText(label)
+      ) {
+        const key = `${id}\u0000${label.toLowerCase()}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          records.push({
+            id,
+            label,
+            type:
+              cleanText(candidate.type, 80, { singleLine: true })
+                .toLowerCase()
+                .replace(/[^a-z0-9._-]+/g, "-")
+                .replace(/^-+|-+$/g, "")
+                .slice(0, 80) ||
+              (
+                normalizedPath.includes("entities") ||
+                normalizedPath.includes("highlightiocs")
+                  ? "entity"
+                  : "report"
+              ),
+          });
+        }
+      }
+    }
+
+    for (const [childKey, childValue] of Object.entries(candidate).slice(0, 200)) {
+      visit(childValue, [...path, childKey], depth + 1);
+    }
+  }
+
+  visit(value);
+  return records;
+}
+
 function normalizeCitation(candidate, index) {
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
   const title = cleanText(candidate.title, 400, { singleLine: true });
@@ -293,6 +376,7 @@ export function normalizeStructuredResult(
   {
     allowUiActions = false,
     citationEvidenceUrls = [],
+    graphEntityEvidence = [],
     nativeWebSearchCompleted = false,
   } = {},
 ) {
@@ -302,6 +386,33 @@ export function normalizeStructuredResult(
       .map((value) => safePublicUrl(value))
       .filter(Boolean),
   );
+  const entityEvidence = new Map();
+  const rawGraphEntityEvidence = Array.isArray(graphEntityEvidence)
+    ? graphEntityEvidence
+    : [];
+  for (const candidate of rawGraphEntityEvidence.slice(0, MAX_ENTITY_ITEMS * 2)) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      continue;
+    }
+    const id = cleanIdentifier(candidate.id, 240);
+    const label = cleanText(candidate.label, 240, { singleLine: true });
+    if (
+      !id.startsWith("nodes_vertex_collection/") ||
+      !label ||
+      suspiciousInstructionText(label)
+    ) {
+      continue;
+    }
+    const type =
+      cleanText(candidate.type, 80, { singleLine: true })
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 80) || "entity";
+    const labels = entityEvidence.get(id) || new Map();
+    labels.set(label.toLowerCase(), type);
+    entityEvidence.set(id, labels);
+  }
   let parsed;
   try {
     parsed = JSON.parse(String(raw || ""));
@@ -320,6 +431,7 @@ export function normalizeStructuredResult(
       metrics: {
         entitiesReceived: 0,
         entitiesAccepted: 0,
+        entitiesRemovedNoEvidence: 0,
         citationsReceived: 0,
         citationsUrlSafe: 0,
         citationsAccepted: 0,
@@ -339,10 +451,27 @@ export function normalizeStructuredResult(
     : [];
   const entities = [];
   const entityIds = new Set();
+  const entityReferences = new Set();
+  let entitiesRemovedNoEvidence = 0;
   for (const candidate of rawEntities) {
     const normalized = normalizeEntity(candidate);
     if (!normalized || entityIds.has(normalized.id)) continue;
+    const evidenceReference = normalized.graphRef || normalized.id;
+    const evidenceLabels = entityEvidence.get(evidenceReference);
+    const evidenceType = evidenceLabels?.get(normalized.label.toLowerCase());
+    if (
+      !evidenceType ||
+      entityReferences.has(evidenceReference)
+    ) {
+      entitiesRemovedNoEvidence += 1;
+      continue;
+    }
+    if (!normalized.graphRef) {
+      normalized.graphRef = evidenceReference;
+    }
+    normalized.type = evidenceType;
     entityIds.add(normalized.id);
+    entityReferences.add(evidenceReference);
     entities.push(normalized);
   }
 
@@ -392,6 +521,7 @@ export function normalizeStructuredResult(
     metrics: {
       entitiesReceived: rawEntities.length,
       entitiesAccepted: entities.length,
+      entitiesRemovedNoEvidence,
       citationsReceived: rawCitations.length,
       citationsUrlSafe,
       citationsAccepted: citations.length,

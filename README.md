@@ -48,6 +48,12 @@ Security boundaries:
   embedded only in untrusted report prose are not promoted to citation
   evidence. Citation URLs also reject single-label/internal hosts, private or
   link-local addresses, and IPv4-mapped/private IPv6 forms;
+- interactive entities fail closed unless the exact canonical graph document
+  ID, label, and type appeared in the current turn's completed curated graph
+  search or report-detail result. The evidence-authoritative type replaces any
+  model-supplied type. Web-only names, arbitrary custom-query fields, inferred
+  labels, mismatched labels, and invented graph references never receive
+  clickable follow-up actions;
 - consequential external actions are not enabled.
 
 The response includes Markdown, Explorer actions, grounded clickable entities,
