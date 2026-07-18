@@ -1,8 +1,12 @@
+import asyncio
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from lunar_agent import main as main_module
+from lunar_agent.models import ExplorerAgentCancelRequest, ExplorerAgentRespondRequest
+from lunar_agent.turn_registry import ExplorerTurnRegistry
 
 
 def _authenticated_client(monkeypatch):
@@ -211,3 +215,94 @@ def test_explorer_agent_endpoint_hides_codex_failure_detail(monkeypatch):
     assert response.status_code == 500
     assert response.json() == {"detail": "Explorer agent response failed."}
     assert "chatgpt-auth-secret" not in response.text
+
+
+def test_explorer_agent_cancel_requires_authentication(monkeypatch):
+    monkeypatch.setattr(main_module.settings, "shared_token", "configured-secret")
+    response = TestClient(main_module.app).post(
+        "/v1/explorer-agent/cancel",
+        json={"sessionId": "session-1", "requestId": "request-1"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_explorer_agent_cancel_fences_a_late_response(monkeypatch):
+    monkeypatch.setattr(main_module, "_explorer_turn_registry", ExplorerTurnRegistry())
+    called = False
+
+    async def fake_codex_turn(_request):
+        nonlocal called
+        called = True
+        return {
+            "reply": "must not run",
+            "actions": [],
+            "followUps": [],
+            "entities": [],
+            "citations": [],
+        }
+
+    monkeypatch.setattr(main_module, "run_explorer_codex_turn", fake_codex_turn)
+    client = _authenticated_client(monkeypatch)
+    cancel = client.post(
+        "/v1/explorer-agent/cancel",
+        json={"sessionId": "session-late", "requestId": "request-late"},
+    )
+    response = client.post(
+        "/v1/explorer-agent/respond",
+        json={
+            "sessionId": "session-late",
+            "requestId": "request-late",
+            "queryPreview": "Current Explorer scope",
+            "queryContext": {},
+            "querySummary": {},
+            "currentUserMessage": "Investigate Acme",
+        },
+    )
+
+    assert cancel.status_code == 200
+    assert cancel.json()["cancelled"] is False
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Explorer agent turn was cancelled."}
+    assert called is False
+
+
+def test_explorer_agent_cancel_interrupts_an_active_response(monkeypatch):
+    registry = ExplorerTurnRegistry()
+    monkeypatch.setattr(main_module, "_explorer_turn_registry", registry)
+
+    async def exercise():
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def long_codex_turn(_request):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        monkeypatch.setattr(main_module, "run_explorer_codex_turn", long_codex_turn)
+        request = ExplorerAgentRespondRequest(
+            sessionId="session-active",
+            requestId="request-active",
+            queryPreview="Current Explorer scope",
+            queryContext={},
+            querySummary={},
+            currentUserMessage="Investigate Acme",
+        )
+        response_task = asyncio.create_task(main_module.explorer_agent_respond(request))
+        await started.wait()
+
+        result = await main_module.explorer_agent_cancel(ExplorerAgentCancelRequest(
+            sessionId="session-active",
+            requestId="request-active",
+        ))
+
+        assert result.cancelled is True
+        with pytest.raises(HTTPException) as error:
+            await response_task
+        assert error.value.status_code == 409
+        assert stopped.is_set()
+
+    asyncio.run(exercise())
