@@ -62,6 +62,68 @@ def test_explorer_agent_request_rejects_oversized_message():
         )
 
 
+@pytest.mark.parametrize(
+    ("payload", "accepted"),
+    [
+        ({"status": "ok", "sandbox": "bubblewrap"}, False),
+        (
+            {
+                "status": "ok",
+                "sandbox": "bubblewrap",
+                "verification": "executable",
+            },
+            True,
+        ),
+    ],
+)
+def test_command_broker_status_requires_executable_probe(
+    payload,
+    accepted,
+    monkeypatch,
+):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, headers):
+            assert url == "http://command-broker/live"
+            assert headers == {"Authorization": "Bearer broker-test-token"}
+            return Response()
+
+    monkeypatch.setattr(codex_module.Path, "is_socket", lambda _path: True)
+    monkeypatch.setattr(
+        codex_module.httpx,
+        "AsyncHTTPTransport",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(codex_module.httpx, "AsyncClient", Client)
+
+    if accepted:
+        result = asyncio.run(codex_module.command_broker_status())
+        assert result == {
+            "configured": True,
+            "mode": "isolated-workspace",
+            "verified": True,
+        }
+    else:
+        with pytest.raises(codex_module.ExplorerCodexRuntimeError) as exc_info:
+            asyncio.run(codex_module.command_broker_status())
+        assert exc_info.value.code == "command_sandbox_unavailable"
+
+
 def test_project_root_uses_deployed_application_root(tmp_path, monkeypatch):
     runtime = tmp_path / "codex_runtime"
     runtime.mkdir()

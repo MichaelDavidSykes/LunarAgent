@@ -27,7 +27,7 @@ Environment=LUNAR_AGENT_CODEX_MODEL=gpt-5.6-sol
 Environment=LUNAR_AGENT_CODEX_REASONING_EFFORT=medium
 Environment=LUNAR_AGENT_CODEX_TIMEOUT=900
 Environment=LUNAR_AGENT_CODEX_MAX_CONCURRENT_REQUESTS=2
-Environment=LUNAR_AGENT_CODEX_WORKSPACE_ROOT=/var/lib/lunar-agent/workspaces
+Environment=LUNAR_AGENT_CODEX_WORKSPACE_ROOT=/tmp/lunar-agent-codex-workspaces
 Environment=LUNAR_AGENT_COMMAND_BROKER_SOCKET=/run/lunar-agent-command-broker/broker.sock
 Environment=CODEX_HOME=/codex-auth
 ExecStartPre=-/usr/bin/docker rm -f lunar-agent
@@ -58,7 +58,6 @@ ExecStart=/usr/bin/docker run --rm \
   --env LUNAR_AGENT_COMMAND_BROKER_TOKEN \
   --env CODEX_HOME \
   --volume /etc/lunar-agent/codex:/codex-auth:rw \
-  --volume /var/lib/lunar-agent/workspaces:/var/lib/lunar-agent/workspaces:rw \
   --volume /run/lunar-agent-command-broker:/run/lunar-agent-command-broker:ro \
   --publish 127.0.0.1:8310:8310 \
   --publish 172.17.0.1:8310:8310 \

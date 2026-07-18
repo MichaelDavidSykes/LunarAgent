@@ -122,7 +122,8 @@ Optional:
 - `LUNAR_AGENT_CODEX_REASONING_EFFORT` (default `medium`)
 - `LUNAR_AGENT_CODEX_TIMEOUT` (default `900`)
 - `LUNAR_AGENT_CODEX_MAX_CONCURRENT_REQUESTS` (default `2`)
-- `LUNAR_AGENT_CODEX_WORKSPACE_ROOT` (default `/tmp/lunar-agent-workspaces`)
+- `LUNAR_AGENT_CODEX_WORKSPACE_ROOT` (default `/tmp/lunar-agent-workspaces`;
+  production `/tmp/lunar-agent-codex-workspaces` on the container tmpfs)
 - `CODEX_HOME` (default and production value `/codex-auth`)
 - `LUNAR_AGENT_APP_ROOT` (production image value `/app`)
 - `CODEX_CLI_PATH` (optional bundled CLI override)
@@ -147,12 +148,20 @@ a fresh Bubblewrap namespace with:
   output, a hard deadline, and content-level credential redaction.
 
 The Agent health route fails closed when this command sandbox is unavailable.
+The broker health contract runs and briefly caches a real isolated probe; it
+verifies namespace setup, the private workspace, absence of mounted auth/backend
+secrets, and rejection of IP sockets rather than reporting ready from binary
+presence alone.
 The runtime never treats a failed command as verified, and the final response
 receives a deterministic warning if a model attempts to claim otherwise.
-The broker and Agent container share only UID `10001` and the workspace/socket
-mounts. The per-command process ceiling accounts for Codex threads charged to
-that shared UID, while the broker's independent systemd `TasksMax` cgroup stays
-the tighter process boundary for command execution.
+The broker and Agent container share UID `10001` for the protected broker socket,
+but the host command-workspace root is deliberately not mounted into the Agent
+container. The broker lazily creates the opaque host workspace on the first
+command, while Codex receives a separate session cwd on the container's private
+`/tmp`. A turn therefore cannot inspect a sibling session's command files. The
+per-command process ceiling accounts for Codex threads charged to the shared
+UID, while the broker's independent systemd `TasksMax` cgroup stays the tighter
+process boundary for command execution.
 
 Callers must send the configured `LUNAR_AGENT_SHARED_TOKEN`:
 
@@ -174,9 +183,10 @@ The production command broker runs separately as
 `lunar-agent-command-broker.service`; see `deploy/`. It requires Bubblewrap,
 the dedicated unprivileged `lunaragent` account, a root-owned environment file
 containing the broker token, and the shared workspace directory. The Agent
-container receives only the broker socket, broker token, and workspace mount.
+container receives only the broker socket and broker token; it does not receive
+the host command-workspace mount.
 `deploy/lunar-agent.service` preserves the existing read-only, capability-free
-Agent container boundary and adds only those mounts. The broker itself runs as
+Agent container boundary and adds only the read-only socket mount. The broker itself runs as
 the unprivileged host account with systemd hardening. Its only allowed socket
 families are Unix sockets and the netlink socket Bubblewrap needs to create a
 private, disconnected network namespace.
