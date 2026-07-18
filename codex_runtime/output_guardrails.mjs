@@ -60,6 +60,24 @@ function privateIpv4(hostname) {
   );
 }
 
+function privateIpv6(hostname) {
+  const normalized = hostname.toLowerCase();
+  if (!normalized.includes(":")) return false;
+  if (
+    normalized.startsWith("::")
+  ) {
+    return true;
+  }
+  const firstSegment = normalized.split(":").find(Boolean);
+  if (!firstSegment || !/^[0-9a-f]{1,4}$/.test(firstSegment)) return true;
+  const firstHextet = Number.parseInt(firstSegment, 16);
+  return (
+    (firstHextet & 0xfe00) === 0xfc00 ||
+    (firstHextet & 0xffc0) === 0xfe80 ||
+    (firstHextet & 0xff00) === 0xff00
+  );
+}
+
 export function safePublicUrl(value) {
   const raw = cleanText(value, 2000, { singleLine: true });
   if (!raw) return "";
@@ -79,16 +97,8 @@ export function safePublicUrl(value) {
     hostname.endsWith(".local") ||
     hostname.endsWith(".internal") ||
     privateIpv4(hostname) ||
-    hostname === "::" ||
-    hostname === "::1" ||
-    (
-      hostname.includes(":") &&
-      (
-        hostname.startsWith("fe80:") ||
-        hostname.startsWith("fc") ||
-        hostname.startsWith("fd")
-      )
-    )
+    privateIpv6(hostname) ||
+    (!hostname.includes(":") && !hostname.includes("."))
   ) {
     return "";
   }
@@ -96,15 +106,45 @@ export function safePublicUrl(value) {
   return parsed.toString().slice(0, 2000);
 }
 
-function citationUrlField(key) {
-  const normalized = String(key || "")
+function normalizedFieldName(value) {
+  return String(value || "")
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "");
+}
+
+const EXPLICIT_CITATION_URL_FIELDS = new Set([
+  "citationlink",
+  "citationurl",
+  "citationurls",
+  "evidencelink",
+  "evidenceurl",
+  "evidenceurls",
+  "sourcelink",
+  "sourceurl",
+  "sourceurls",
+  "verifiedsourceurls",
+]);
+const CITATION_URL_CONTAINER_FIELDS = new Set([
+  "citation",
+  "citations",
+  "evidence",
+  "externalreference",
+  "externalreferences",
+  "reference",
+  "references",
+  "source",
+  "sources",
+]);
+
+function citationUrlField(path) {
+  const field = normalizedFieldName(path.at(-1));
+  if (EXPLICIT_CITATION_URL_FIELDS.has(field)) return true;
+  if (!["href", "link", "uri", "url"].includes(field)) return false;
   return (
-    normalized === "source" ||
-    normalized.includes("url") ||
-    normalized.endsWith("uri") ||
-    normalized.endsWith("link")
+    path
+      .slice(0, -1)
+      .map(normalizedFieldName)
+      .some((ancestor) => CITATION_URL_CONTAINER_FIELDS.has(ancestor))
   );
 }
 
@@ -113,7 +153,7 @@ export function collectCitationEvidenceUrls(value) {
   const visited = new WeakSet();
   let visitedNodes = 0;
 
-  function visit(candidate, key = "", depth = 0) {
+  function visit(candidate, path = [], depth = 0) {
     if (
       candidate == null ||
       depth > 7 ||
@@ -124,7 +164,7 @@ export function collectCitationEvidenceUrls(value) {
     }
     visitedNodes += 1;
     if (typeof candidate === "string") {
-      if (!citationUrlField(key)) return;
+      if (!citationUrlField(path)) return;
       const safe = safePublicUrl(candidate);
       if (safe) urls.add(safe);
       return;
@@ -134,12 +174,12 @@ export function collectCitationEvidenceUrls(value) {
     visited.add(candidate);
     if (Array.isArray(candidate)) {
       for (const item of candidate.slice(0, 200)) {
-        visit(item, key, depth + 1);
+        visit(item, path, depth + 1);
       }
       return;
     }
     for (const [childKey, childValue] of Object.entries(candidate).slice(0, 200)) {
-      visit(childValue, childKey, depth + 1);
+      visit(childValue, [...path, childKey], depth + 1);
     }
   }
 
