@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -16,6 +17,7 @@ from .models import ExplorerAgentRespondRequest, ExplorerAgentRespondResponse
 
 
 logger = logging.getLogger(__name__)
+telemetry_logger = logging.getLogger("uvicorn.error")
 _MAX_RUNNER_LINE_BYTES = 1_000_000
 _MAX_RUNNER_STDERR_CHARS = 12_000
 _EVENT_TYPES = {
@@ -27,6 +29,142 @@ _EVENT_TYPES = {
     "citation.upserted",
     "assistant.delta",
 }
+_RETRYABLE_FAILURE_CODES = {
+    "codex_auth_unavailable",
+    "codex_usage_limited",
+    "graph_bridge_unavailable",
+    "graph_tool_rate_limited",
+    "runtime_timeout",
+    "runtime_unavailable",
+}
+_SAFE_FAILURE_MESSAGES = {
+    "codex_auth_unavailable": (
+        "ChatGPT-managed Codex authentication is unavailable. The service operator must reconnect it."
+    ),
+    "codex_usage_limited": (
+        "The Codex runtime is temporarily usage limited. Retry after the plan limit resets."
+    ),
+    "delegated_token_rejected": (
+        "The delegated LunarGraph authorization was rejected. Start a fresh Explorer turn."
+    ),
+    "graph_session_stale": (
+        "This Explorer graph session is no longer active. Start a fresh turn."
+    ),
+    "graph_bridge_unavailable": (
+        "The LunarGraph tool bridge is temporarily unavailable. Retry this investigation."
+    ),
+    "graph_tool_rate_limited": (
+        "The LunarGraph tool bridge is temporarily rate limited. Retry this investigation shortly."
+    ),
+    "runtime_timeout": (
+        "The investigation exceeded its secure runtime limit. Narrow the request and retry."
+    ),
+    "runtime_unavailable": (
+        "The Codex investigation runtime is temporarily unavailable. Retry this turn."
+    ),
+}
+
+
+class ExplorerCodexRuntimeError(RuntimeError):
+    def __init__(self, code: str):
+        self.code = code if code in _SAFE_FAILURE_MESSAGES else "runtime_unavailable"
+        super().__init__(_SAFE_FAILURE_MESSAGES[self.code])
+
+
+def _request_fingerprint(value: str | None) -> str:
+    return hashlib.sha256(str(value or "missing").encode("utf-8")).hexdigest()[:12]
+
+
+def _runtime_failure_code(exc: BaseException, stderr: str = "") -> str:
+    if isinstance(exc, TimeoutError):
+        return "runtime_timeout"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status in {401, 403}:
+            return "delegated_token_rejected"
+        if status == 409:
+            return "graph_session_stale"
+        if status == 429:
+            return "graph_tool_rate_limited"
+        if status >= 500:
+            return "graph_bridge_unavailable"
+
+    text = f"{type(exc).__name__} {exc} {stderr}".casefold()
+    if any(
+        marker in text
+        for marker in (
+            "login required",
+            "not logged in",
+            "unauthorized",
+            "authentication expired",
+            "refresh token",
+            "chatgpt authentication",
+            "codex authentication",
+        )
+    ):
+        return "codex_auth_unavailable"
+    if any(
+        marker in text
+        for marker in (
+            "usage limit",
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+            "insufficient_quota",
+        )
+    ):
+        return "codex_usage_limited"
+    if any(marker in text for marker in ("timed out", "timeout", "timeouterror")):
+        return "runtime_timeout"
+    if any(
+        marker in text
+        for marker in (
+            "mcp",
+            "lunargraph",
+            "graph tool",
+            "backend bridge",
+            "connection refused",
+            "connecterror",
+        )
+    ):
+        return "graph_bridge_unavailable"
+    return "runtime_unavailable"
+
+
+async def _emit_runtime_failure(
+    sink: Callable[[str, dict[str, Any]], Awaitable[None]],
+    *,
+    code: str,
+    duration_ms: int,
+) -> None:
+    try:
+        await sink(
+            "tool.progress",
+            {
+                "phase": "runtime",
+                "status": "failed",
+                "errorCode": code,
+                "message": _SAFE_FAILURE_MESSAGES.get(
+                    code,
+                    _SAFE_FAILURE_MESSAGES["runtime_unavailable"],
+                ),
+                "durationMs": max(0, duration_ms),
+                "retryable": code in _RETRYABLE_FAILURE_CODES,
+            },
+        )
+    except Exception:
+        logger.debug("LunarAgent could not forward the safe runtime failure event", exc_info=True)
+
+
+async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
 
 
 def _project_root() -> Path:
@@ -164,6 +302,17 @@ async def run_explorer_codex_turn(
     event_sink: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     graph_bootstrap: Callable[[ExplorerAgentRespondRequest], Awaitable[dict[str, Any]]] | None = None,
 ) -> ExplorerAgentRespondResponse:
+    started_at = time.monotonic()
+    session_fingerprint = _request_fingerprint(request.sessionId)
+    request_fingerprint = _request_fingerprint(request.requestId)
+    sink = event_sink or (lambda event_type, data: _forward_event(request, event_type, data))
+    telemetry_logger.info(
+        "Explorer Codex turn started session=%s request=%s model=%s reasoning=%s",
+        session_fingerprint,
+        request_fingerprint,
+        settings.codex_agent_model,
+        settings.codex_agent_reasoning_effort,
+    )
     if not settings.codex_agent_enabled:
         raise RuntimeError("LunarAgent Codex runtime is disabled")
     if not str(request.sessionId or "").strip() or not str(request.requestId or "").strip():
@@ -173,11 +322,41 @@ async def run_explorer_codex_turn(
     if not runner_path.is_file() or not mcp_path.is_file():
         raise RuntimeError("Codex runtime files are missing")
 
-    bootstrap = await (graph_bootstrap or _bootstrap_graph_tools)(request)
+    try:
+        bootstrap = await (graph_bootstrap or _bootstrap_graph_tools)(request)
+    except asyncio.CancelledError:
+        telemetry_logger.info(
+            "Explorer Codex turn cancelled before graph bootstrap session=%s request=%s duration_ms=%s",
+            session_fingerprint,
+            request_fingerprint,
+            int((time.monotonic() - started_at) * 1000),
+        )
+        raise
+    except Exception as exc:
+        code = _runtime_failure_code(exc)
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        await _emit_runtime_failure(sink, code=code, duration_ms=duration_ms)
+        telemetry_logger.warning(
+            "Explorer Codex graph bootstrap failed session=%s request=%s code=%s duration_ms=%s",
+            session_fingerprint,
+            request_fingerprint,
+            code,
+            duration_ms,
+        )
+        raise ExplorerCodexRuntimeError(code) from exc
     delegated_token = str(bootstrap.get("token") or "").strip()
     graph_tools_url = str(bootstrap.get("toolsUrl") or "").strip()
     if not delegated_token or not graph_tools_url:
-        raise RuntimeError("LunarGraph tool session could not be established")
+        code = "graph_bridge_unavailable"
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        await _emit_runtime_failure(sink, code=code, duration_ms=duration_ms)
+        telemetry_logger.warning(
+            "Explorer Codex graph bootstrap incomplete session=%s request=%s duration_ms=%s",
+            session_fingerprint,
+            request_fingerprint,
+            duration_ms,
+        )
+        raise ExplorerCodexRuntimeError(code)
 
     workspace = _workspace_for_thread(request.sessionId)
     payload = {
@@ -203,16 +382,29 @@ async def run_explorer_codex_turn(
         "graphDelegatedToken": delegated_token,
     }
 
-    process = await asyncio.create_subprocess_exec(
-        _node_binary(),
-        str(runner_path),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=_safe_runner_env(),
-        cwd=str(_project_root()),
-        limit=_MAX_RUNNER_LINE_BYTES + 1,
-    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            _node_binary(),
+            str(runner_path),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=_safe_runner_env(),
+            cwd=str(_project_root()),
+            limit=_MAX_RUNNER_LINE_BYTES + 1,
+        )
+    except Exception as exc:
+        code = _runtime_failure_code(exc)
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        await _emit_runtime_failure(sink, code=code, duration_ms=duration_ms)
+        telemetry_logger.error(
+            "Explorer Codex process launch failed session=%s request=%s code=%s duration_ms=%s",
+            session_fingerprint,
+            request_fingerprint,
+            code,
+            duration_ms,
+        )
+        raise ExplorerCodexRuntimeError(code) from exc
     if process.stdin is None or process.stdout is None or process.stderr is None:
         process.kill()
         raise RuntimeError("Codex runtime streams could not be opened")
@@ -222,7 +414,7 @@ async def run_explorer_codex_turn(
     process.stdin.close()
     stderr_task = asyncio.create_task(_read_stderr(process.stderr))
     result: dict[str, Any] | None = None
-    sink = event_sink or (lambda event_type, data: _forward_event(request, event_type, data))
+    failure: Exception | None = None
 
     try:
         async with asyncio.timeout(max(30, min(int(settings.codex_agent_timeout), 1800))):
@@ -250,26 +442,55 @@ async def run_explorer_codex_turn(
                 elif message.get("kind") == "result":
                     result = message
             await process.wait()
-    except BaseException:
-        if process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+    except asyncio.CancelledError:
+        await _terminate_process(process)
+        telemetry_logger.info(
+            "Explorer Codex turn cancelled session=%s request=%s duration_ms=%s",
+            session_fingerprint,
+            request_fingerprint,
+            int((time.monotonic() - started_at) * 1000),
+        )
         raise
+    except Exception as exc:
+        failure = exc
+        await _terminate_process(process)
     finally:
         stderr = await stderr_task
 
-    if process.returncode != 0 or result is None:
-        if stderr:
-            logger.error(
-                "LunarAgent Codex runtime failed (exit=%s): %s",
-                process.returncode,
-                stderr[-2000:],
-            )
-        raise RuntimeError("LunarAgent Codex runtime failed")
+    if failure is not None or process.returncode != 0 or result is None:
+        runtime_exc = failure or RuntimeError("Codex runtime exited without a result")
+        code = _runtime_failure_code(runtime_exc, stderr)
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        await _emit_runtime_failure(sink, code=code, duration_ms=duration_ms)
+        telemetry_logger.error(
+            (
+                "Explorer Codex turn failed session=%s request=%s code=%s "
+                "duration_ms=%s exit=%s stderr_chars=%s stderr_sha256=%s"
+            ),
+            session_fingerprint,
+            request_fingerprint,
+            code,
+            duration_ms,
+            process.returncode,
+            len(stderr),
+            hashlib.sha256(stderr.encode("utf-8")).hexdigest()[:12] if stderr else "none",
+        )
+        raise ExplorerCodexRuntimeError(code) from runtime_exc
+
+    duration_ms = int((time.monotonic() - started_at) * 1000)
+    telemetry_logger.info(
+        (
+            "Explorer Codex turn completed session=%s request=%s model=%s duration_ms=%s "
+            "entities=%s citations=%s actions=%s"
+        ),
+        session_fingerprint,
+        request_fingerprint,
+        str(result.get("model") or settings.codex_agent_model).strip(),
+        duration_ms,
+        len(result.get("entities") or []),
+        len(result.get("citations") or []),
+        len(result.get("actions") or []),
+    )
 
     return ExplorerAgentRespondResponse(
         reply=str(result.get("finalResponse") or "").strip()[:60000],
