@@ -26,7 +26,10 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-RestrictAddressFamilies=AF_UNIX
+# Bubblewrap needs AF_NETLINK while creating the command's private network
+# namespace; the sandboxed command itself still receives only that isolated
+# namespace and cannot reach the host or public network.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
 RestrictRealtime=yes
 LockPersonality=yes
 CapabilityBoundingSet=
