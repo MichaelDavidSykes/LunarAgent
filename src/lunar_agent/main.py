@@ -9,19 +9,17 @@ from .config import settings
 from .models import (
     ExplorerAgentRespondRequest,
     ExplorerAgentRespondResponse,
-    HomeAgentRespondRequest,
-    HomeAgentRespondResponse,
     SafeRouteAreaRiskResearchRequest,
     SafeRouteAreaRiskResearchResponse,
 )
-from .home_agent import codex_auth_status, run_home_agent_turn
-from .service import research_safe_route_area_risk, respond
+from .codex_agent import codex_auth_status, run_explorer_codex_turn
+from .service import research_safe_route_area_risk
 
 app = FastAPI(title=settings.project_name)
 logger = logging.getLogger(__name__)
 _request_semaphore = asyncio.Semaphore(max(1, min(int(settings.max_concurrent_requests or 8), 32)))
-_home_request_semaphore = asyncio.Semaphore(
-    max(1, min(int(settings.home_agent_max_concurrent_requests or 2), 8))
+_codex_request_semaphore = asyncio.Semaphore(
+    max(1, min(int(settings.codex_agent_max_concurrent_requests or 2), 8))
 )
 _quota_lock = asyncio.Lock()
 _quota_events: dict[str, list[float]] = {}
@@ -83,18 +81,19 @@ async def health() -> dict:
         )
     ):
         raise HTTPException(status_code=503, detail="Agent dependencies are not configured")
-    home_auth = await codex_auth_status()
+    codex_auth = await codex_auth_status()
     return {
         "status": "ok",
         "service": settings.project_name,
         "model": settings.model,
         "authConfigured": True,
         "dependenciesConfigured": True,
-        "homeAgent": {
-            "enabled": bool(settings.home_agent_enabled),
-            "model": settings.home_agent_model,
-            "reasoningEffort": settings.home_agent_reasoning_effort,
-            "auth": home_auth,
+        "lunarAgent": {
+            "enabled": bool(settings.codex_agent_enabled),
+            "model": settings.codex_agent_model,
+            "reasoningEffort": settings.codex_agent_reasoning_effort,
+            "billingMode": "chatgpt-plan",
+            "auth": codex_auth,
         },
     }
 
@@ -104,22 +103,22 @@ async def live() -> dict:
     return {"status": "ok", "service": settings.project_name}
 
 
-@app.get("/v1/home-agent/health", dependencies=[Depends(require_token)])
-async def home_agent_health() -> dict:
+@app.get("/v1/explorer-agent/health", dependencies=[Depends(require_token)])
+async def explorer_agent_health() -> dict:
     auth = await codex_auth_status()
-    if not settings.home_agent_enabled:
-        raise HTTPException(status_code=503, detail="Home Agent runtime is disabled")
+    if not settings.codex_agent_enabled:
+        raise HTTPException(status_code=503, detail="LunarAgent Codex runtime is disabled")
     if not auth["configured"]:
         raise HTTPException(status_code=503, detail="ChatGPT-managed Codex authentication is unavailable")
     if not str(settings.backend_base_url or "").strip() or not str(
         settings.backend_shared_token or ""
     ).strip():
-        raise HTTPException(status_code=503, detail="Home Agent backend bridge is unavailable")
+        raise HTTPException(status_code=503, detail="LunarAgent backend bridge is unavailable")
     return {
         "status": "ok",
         "service": settings.project_name,
-        "model": settings.home_agent_model,
-        "reasoningEffort": settings.home_agent_reasoning_effort,
+        "model": settings.codex_agent_model,
+        "reasoningEffort": settings.codex_agent_reasoning_effort,
         "auth": auth,
         "billingMode": "chatgpt-plan",
     }
@@ -129,41 +128,12 @@ async def home_agent_health() -> dict:
 async def explorer_agent_respond(request: ExplorerAgentRespondRequest) -> ExplorerAgentRespondResponse:
     try:
         await enforce_request_quota(request.quotaKey, "explorer")
-        async with _request_semaphore:
-            payload = await respond(
-                session_id=request.sessionId,
-                allow_ui_actions=bool(request.allowUiActions),
-                conversation_history=[message.model_dump() for message in request.conversationHistory],
-                query_preview=request.queryPreview,
-                summary=request.querySummary,
-                context=request.queryContext,
-                user_message=request.currentUserMessage,
-            )
-        return ExplorerAgentRespondResponse(**payload)
+        async with _codex_request_semaphore:
+            return await run_explorer_codex_turn(request)
     except HTTPException:
         raise
     except Exception as exc:
         raise_internal_server_error(exc, "Explorer agent response failed.")
-
-
-@app.post(
-    "/v1/home-agent/respond",
-    response_model=HomeAgentRespondResponse,
-    dependencies=[Depends(require_token)],
-)
-async def home_agent_respond(request: HomeAgentRespondRequest) -> HomeAgentRespondResponse:
-    try:
-        await enforce_request_quota(request.clientId, "home")
-        async with _home_request_semaphore:
-            return await run_home_agent_turn(request)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(
-            "Home Agent response failed (%s)",
-            type(exc).__name__,
-        )
-        raise HTTPException(status_code=500, detail="Home Agent response failed.") from exc
 
 
 @app.post(

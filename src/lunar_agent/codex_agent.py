@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from .config import settings
-from .models import HomeAgentRespondRequest, HomeAgentRespondResponse
+from .models import ExplorerAgentRespondRequest, ExplorerAgentRespondResponse
 
 
 logger = logging.getLogger(__name__)
@@ -62,13 +62,13 @@ def _codex_home() -> str:
 
 def _workspace_for_thread(thread_id: str) -> Path:
     digest = hashlib.sha256(str(thread_id).encode("utf-8")).hexdigest()[:24]
-    root = Path(settings.home_agent_workspace_root).expanduser().resolve()
+    root = Path(settings.codex_agent_workspace_root).expanduser().resolve()
     workspace = root / digest
     workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
     marker = workspace / "README.md"
     if not marker.exists():
         marker.write_text(
-            "# LunarChain Home investigation workspace\n\n"
+            "# LunarChain Explorer Agent investigation workspace\n\n"
             "This isolated workspace is available for temporary analysis files and commands. "
             "Do not place credentials or persistent customer exports here.\n",
             encoding="utf-8",
@@ -98,7 +98,7 @@ async def _post_backend(
     base_url = str(settings.backend_base_url or "").strip()
     shared_token = str(settings.backend_shared_token or "").strip()
     if not base_url or not shared_token:
-        raise RuntimeError("Home Agent backend bridge is not configured")
+        raise RuntimeError("LunarAgent backend bridge is not configured")
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds, connect=10.0)) as client:
         response = await client.post(
             f"{base_url.rstrip('/')}{path}",
@@ -108,34 +108,34 @@ async def _post_backend(
         response.raise_for_status()
         data = response.json()
     if not isinstance(data, dict):
-        raise RuntimeError("Home Agent backend returned an invalid payload")
+        raise RuntimeError("LunarAgent backend returned an invalid payload")
     return data
 
 
-async def _bootstrap_graph_tools(request: HomeAgentRespondRequest) -> dict[str, Any]:
+async def _bootstrap_graph_tools(request: ExplorerAgentRespondRequest) -> dict[str, Any]:
     return await _post_backend(
-        "/api/v1/home/internal/tool-sessions",
+        "/api/v1/graph/ai-agent/tools/codex-session",
         {
-            "threadId": request.threadId,
-            "turnId": request.turnId,
-            "clientId": request.clientId,
+            "session_id": request.sessionId,
+            "request_id": request.requestId,
+            "client_id": request.clientId,
         },
         timeout_seconds=min(max(float(settings.backend_http_timeout), 10.0), 90.0),
     )
 
 
 async def _forward_event(
-    request: HomeAgentRespondRequest,
+    request: ExplorerAgentRespondRequest,
     event_type: str,
     data: dict[str, Any],
 ) -> None:
     if event_type not in _EVENT_TYPES:
         return
     await _post_backend(
-        "/api/v1/home/internal/events",
+        "/api/v1/graph/ai-agent/tools/activity",
         {
-            "thread_id": request.threadId,
-            "turn_id": request.turnId,
+            "session_id": request.sessionId,
+            "request_id": request.requestId,
             "event_type": event_type,
             "data": data,
         },
@@ -158,14 +158,16 @@ async def _read_stderr(stream: asyncio.StreamReader) -> str:
     return "".join(chunks)
 
 
-async def run_home_agent_turn(
-    request: HomeAgentRespondRequest,
+async def run_explorer_codex_turn(
+    request: ExplorerAgentRespondRequest,
     *,
     event_sink: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
-    graph_bootstrap: Callable[[HomeAgentRespondRequest], Awaitable[dict[str, Any]]] | None = None,
-) -> HomeAgentRespondResponse:
-    if not settings.home_agent_enabled:
-        raise RuntimeError("Home Agent runtime is disabled")
+    graph_bootstrap: Callable[[ExplorerAgentRespondRequest], Awaitable[dict[str, Any]]] | None = None,
+) -> ExplorerAgentRespondResponse:
+    if not settings.codex_agent_enabled:
+        raise RuntimeError("LunarAgent Codex runtime is disabled")
+    if not str(request.sessionId or "").strip() or not str(request.requestId or "").strip():
+        raise RuntimeError("Explorer session and request identifiers are required")
     runner_path = _runner_path()
     mcp_path = _mcp_server_path()
     if not runner_path.is_file() or not mcp_path.is_file():
@@ -177,17 +179,21 @@ async def run_home_agent_turn(
     if not delegated_token or not graph_tools_url:
         raise RuntimeError("LunarGraph tool session could not be established")
 
-    workspace = _workspace_for_thread(request.threadId)
+    workspace = _workspace_for_thread(request.sessionId)
     payload = {
-        "threadId": request.threadId,
-        "turnId": request.turnId,
+        "threadId": request.sessionId,
+        "turnId": request.requestId,
         "codexThreadId": request.codexThreadId,
-        "clientId": request.clientId,
+        "clientId": request.clientId or request.quotaKey or request.sessionId,
         "currentUserMessage": request.currentUserMessage,
         "selectedEntities": [item.model_dump() for item in request.selectedEntities],
         "conversationHistory": [item.model_dump() for item in request.conversationHistory],
-        "model": str(settings.home_agent_model or "gpt-5.6-sol").strip(),
-        "reasoningEffort": str(settings.home_agent_reasoning_effort or "ultra").strip(),
+        "queryPreview": request.queryPreview,
+        "querySummary": request.querySummary,
+        "queryContext": request.queryContext,
+        "allowUiActions": bool(request.allowUiActions),
+        "model": str(settings.codex_agent_model or "gpt-5.6-sol").strip(),
+        "reasoningEffort": str(settings.codex_agent_reasoning_effort or "medium").strip(),
         "workspace": str(workspace),
         "codexHome": _codex_home(),
         "codexPath": str(settings.codex_cli_path or "").strip() or None,
@@ -219,7 +225,7 @@ async def run_home_agent_turn(
     sink = event_sink or (lambda event_type, data: _forward_event(request, event_type, data))
 
     try:
-        async with asyncio.timeout(max(30, min(int(settings.home_agent_timeout), 1800))):
+        async with asyncio.timeout(max(30, min(int(settings.codex_agent_timeout), 1800))):
             while True:
                 line = await process.stdout.readline()
                 if not line:
@@ -240,7 +246,7 @@ async def run_home_agent_turn(
                         try:
                             await sink(event_type, data)
                         except Exception as exc:
-                            logger.warning("Home Agent event forwarding failed: %s", type(exc).__name__)
+                            logger.warning("LunarAgent event forwarding failed: %s", type(exc).__name__)
                 elif message.get("kind") == "result":
                     result = message
             await process.wait()
@@ -259,16 +265,18 @@ async def run_home_agent_turn(
     if process.returncode != 0 or result is None:
         if stderr:
             logger.error(
-                "Codex Home runtime failed (exit=%s): %s",
+                "LunarAgent Codex runtime failed (exit=%s): %s",
                 process.returncode,
                 stderr[-2000:],
             )
-        raise RuntimeError("Codex Home runtime failed")
+        raise RuntimeError("LunarAgent Codex runtime failed")
 
-    return HomeAgentRespondResponse(
-        final_response=str(result.get("finalResponse") or "").strip()[:60000],
-        codex_thread_id=str(result.get("codexThreadId") or "").strip() or None,
-        model=str(result.get("model") or settings.home_agent_model).strip() or None,
+    return ExplorerAgentRespondResponse(
+        reply=str(result.get("finalResponse") or "").strip()[:60000],
+        codexThreadId=str(result.get("codexThreadId") or "").strip() or None,
+        model=str(result.get("model") or settings.codex_agent_model).strip() or None,
+        actions=list(result.get("actions") or [])[:4],
+        followUps=list(result.get("followUps") or [])[:4],
         entities=list(result.get("entities") or [])[:100],
         citations=list(result.get("citations") or [])[:100],
     )

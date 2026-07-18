@@ -51,20 +51,23 @@ class Settings(BaseSettings):
     backend_base_url: str = os.getenv("LUNAR_AGENT_BACKEND_BASE_URL", "")
     backend_shared_token: str = os.getenv("LUNAR_AGENT_BACKEND_SHARED_TOKEN", "")
     backend_http_timeout: int = _env_int("LUNAR_AGENT_BACKEND_HTTP_TIMEOUT", 45)
-    home_agent_enabled: bool = _env_bool("LUNAR_HOME_AGENT_ENABLED", True)
-    home_agent_model: str = os.getenv("LUNAR_HOME_AGENT_MODEL", "gpt-5.6-sol")
-    home_agent_reasoning_effort: str = os.getenv("LUNAR_HOME_AGENT_REASONING_EFFORT", "ultra")
-    home_agent_timeout: int = _env_int("LUNAR_HOME_AGENT_TIMEOUT", 900)
-    home_agent_max_concurrent_requests: int = _env_int(
-        "LUNAR_HOME_AGENT_MAX_CONCURRENT_REQUESTS",
+    codex_agent_enabled: bool = _env_bool("LUNAR_AGENT_CODEX_ENABLED", True)
+    codex_agent_model: str = os.getenv("LUNAR_AGENT_CODEX_MODEL", "gpt-5.6-sol")
+    codex_agent_reasoning_effort: str = os.getenv(
+        "LUNAR_AGENT_CODEX_REASONING_EFFORT",
+        "medium",
+    )
+    codex_agent_timeout: int = _env_int("LUNAR_AGENT_CODEX_TIMEOUT", 900)
+    codex_agent_max_concurrent_requests: int = _env_int(
+        "LUNAR_AGENT_CODEX_MAX_CONCURRENT_REQUESTS",
         2,
     )
     codex_home: str = os.getenv("CODEX_HOME", "")
     codex_cli_path: str = os.getenv("CODEX_CLI_PATH", "")
     codex_node_binary: str = os.getenv("CODEX_NODE_BINARY", "node")
-    home_agent_workspace_root: str = os.getenv(
-        "LUNAR_HOME_AGENT_WORKSPACE_ROOT",
-        "/tmp/lunar-home-workspaces",
+    codex_agent_workspace_root: str = os.getenv(
+        "LUNAR_AGENT_CODEX_WORKSPACE_ROOT",
+        "/tmp/lunar-agent-workspaces",
     )
 
 
