@@ -1,0 +1,52 @@
+[Unit]
+Description=LunarAgent isolated workspace command broker
+After=local-fs.target
+Before=lunar-agent.service
+
+[Service]
+Type=simple
+User=lunaragent
+Group=lunaragent
+EnvironmentFile=/etc/lunar-agent-command-broker.env
+WorkingDirectory=/opt/lunar-agent-command-broker/current
+RuntimeDirectory=lunar-agent-command-broker
+RuntimeDirectoryMode=0700
+UMask=0077
+ExecStart=/opt/lunar-agent-command-broker/venv/bin/uvicorn lunar_agent.command_broker:app --uds /run/lunar-agent-command-broker/broker.sock
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+# Bubblewrap mounts a fresh /proc inside each user/PID namespace. Enabling
+# ProtectKernelTunables on the outer service prevents that namespaced mount.
+# The broker is still an unprivileged account with no ambient host capability.
+ProtectKernelTunables=no
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+# A systemd-owned UTS namespace prevents Bubblewrap from mounting the fresh
+# /proc required by its child PID namespace. The unprivileged broker has no
+# host capability to change the hostname; each command still gets a private UTS
+# namespace and fixed hostname from Bubblewrap.
+ProtectHostname=no
+# Bubblewrap needs AF_NETLINK while creating the command's private network
+# namespace; the sandboxed command itself still receives only that isolated
+# namespace and cannot reach the host or public network.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictRealtime=yes
+LockPersonality=yes
+# The broker process remains an unprivileged user with no ambient capability.
+# These entries only keep Bubblewrap's namespace-setup capabilities in the
+# bounding set; they are gained inside its new user namespace, not on the host.
+CapabilityBoundingSet=CAP_SETPCAP CAP_NET_ADMIN CAP_SYS_ADMIN
+AmbientCapabilities=
+ReadWritePaths=/var/lib/lunar-agent/workspaces /run/lunar-agent-command-broker
+MemoryMax=512M
+TasksMax=160
+
+[Install]
+WantedBy=multi-user.target
