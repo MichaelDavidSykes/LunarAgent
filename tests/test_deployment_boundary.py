@@ -34,3 +34,6 @@ def test_broker_owns_the_only_host_command_workspace_mount() -> None:
         "ReadWritePaths=/var/lib/lunar-agent/workspaces "
         "/run/lunar-agent-command-broker"
     ) in broker_unit
+    assert (
+        "Environment=PYTHONPATH=/opt/lunar-agent-command-broker/current/src"
+    ) in broker_unit

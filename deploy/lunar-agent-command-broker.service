@@ -8,6 +8,7 @@ Type=simple
 User=lunaragent
 Group=lunaragent
 EnvironmentFile=/etc/lunar-agent-command-broker.env
+Environment=PYTHONPATH=/opt/lunar-agent-command-broker/current/src
 WorkingDirectory=/opt/lunar-agent-command-broker/current
 RuntimeDirectory=lunar-agent-command-broker
 RuntimeDirectoryMode=0700

@@ -190,7 +190,10 @@ The production command broker runs separately as
 the dedicated unprivileged `lunaragent` account, a root-owned environment file
 containing the broker token, and the shared workspace directory. The Agent
 container receives only the broker socket and broker token; it does not receive
-the host command-workspace mount.
+the host command-workspace mount. The broker unit pins `PYTHONPATH` to the
+root-controlled `current/src` release link, so an atomic release-link change
+and service restart loads the exact staged broker source rather than a stale
+package previously installed in the shared dependency virtual environment.
 `deploy/lunar-agent.service` preserves the existing read-only, capability-free
 Agent container boundary and adds only the read-only socket mount. The broker itself runs as
 the unprivileged host account with systemd hardening. Its only allowed socket
