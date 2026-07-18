@@ -123,3 +123,12 @@ test("interactive entities require exact current-turn curated graph evidence", (
     /exact graph document id, label, and type appeared in this turn's completed search_intelligence_graph or get_graph_report result/,
   );
 });
+
+test("graph research has a bounded non-redundant evidence budget", () => {
+  assert.match(runner, /at most use four intelligence-graph searches/);
+  assert.match(runner, /Do not repeat overlapping searches or synonym-only variants/);
+  assert.match(runner, /Transient read-only HTTP retry is handled inside the tool bridge/);
+  assert.match(mcpRuntime, /claimGraphToolBudget/);
+  assert.match(mcpRuntime, /shouldRetryGraphHttpStatus/);
+  assert.match(mcpRuntime, /Retry-After/);
+});

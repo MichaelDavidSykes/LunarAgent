@@ -4,6 +4,12 @@ import http from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
+import {
+  claimGraphToolBudget,
+  graphRetryDelayMs,
+  MAX_GRAPH_HTTP_ATTEMPTS,
+  shouldRetryGraphHttpStatus,
+} from "./graph_tool_policy.mjs";
 import { monitorRunnerLifetime } from "./runner_owner.mjs";
 
 const toolsUrl = String(process.env.LUNAR_GRAPH_TOOLS_URL || "").replace(/\/+$/, "");
@@ -30,6 +36,8 @@ if (
 }
 
 let shuttingDown = false;
+const graphToolCallCounts = new Map();
+
 function shutdownWithRunner() {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -52,63 +60,91 @@ const server = new McpServer({
 });
 
 async function callGraphTool(tool, payload) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 65000);
-  try {
-    const response = await fetch(`${toolsUrl}/${tool}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${delegatedToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload || {}),
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { error: "LunarGraph returned a non-JSON response." };
-    }
-    if (!response.ok) {
-      const detail =
-        typeof data?.detail === "string"
-          ? data.detail
-          : data?.detail?.message || `LunarGraph tool failed with HTTP ${response.status}.`;
-      return {
-        isError: true,
-        content: [{ type: "text", text: String(detail).slice(0, 800) }],
-      };
-    }
-    const encoded = JSON.stringify(data);
-    const bounded =
-      encoded.length <= 100000
-        ? encoded
-        : JSON.stringify({
-            truncated: true,
-            summary: "LunarGraph result exceeded the MCP display limit.",
-          });
-    return {
-      content: [{ type: "text", text: bounded }],
-      structuredContent: data,
-    };
-  } catch (error) {
+  const budget = claimGraphToolBudget(graphToolCallCounts, tool);
+  if (!budget.allowed) {
     return {
       isError: true,
       content: [
         {
           type: "text",
           text:
-            error?.name === "AbortError"
-              ? "LunarGraph tool timed out."
-              : "LunarGraph tool is unavailable.",
+            "The bounded LunarGraph evidence budget for this tool is exhausted. " +
+            "Synthesize from completed evidence instead of repeating the lookup.",
         },
       ],
     };
-  } finally {
-    clearTimeout(timer);
   }
+
+  for (let attempt = 0; attempt < MAX_GRAPH_HTTP_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 65000);
+    try {
+      const response = await fetch(`${toolsUrl}/${tool}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${delegatedToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload || {}),
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { error: "LunarGraph returned a non-JSON response." };
+      }
+      if (shouldRetryGraphHttpStatus(response.status, attempt)) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, graphRetryDelayMs(response.headers.get("Retry-After")));
+        });
+        continue;
+      }
+      if (!response.ok) {
+        const detail =
+          typeof data?.detail === "string"
+            ? data.detail
+            : data?.detail?.message || `LunarGraph tool failed with HTTP ${response.status}.`;
+        return {
+          isError: true,
+          content: [{ type: "text", text: String(detail).slice(0, 800) }],
+        };
+      }
+      const encoded = JSON.stringify(data);
+      const bounded =
+        encoded.length <= 100000
+          ? encoded
+          : JSON.stringify({
+              truncated: true,
+              summary: "LunarGraph result exceeded the MCP display limit.",
+            });
+      return {
+        content: [{ type: "text", text: bounded }],
+        structuredContent: data,
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text:
+              error?.name === "AbortError"
+                ? "LunarGraph tool timed out."
+                : "LunarGraph tool is unavailable.",
+          },
+        ],
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  return {
+    isError: true,
+    content: [{ type: "text", text: "LunarGraph tool is temporarily unavailable." }],
+  };
 }
 
 async function callCommandBroker(input) {
