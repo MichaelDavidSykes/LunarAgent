@@ -173,8 +173,31 @@ containing the broker token, and the shared workspace directory. The Agent
 container receives only the broker socket, broker token, and workspace mount.
 `deploy/lunar-agent.service` preserves the existing read-only, capability-free
 Agent container boundary and adds only those mounts. The broker itself runs as
-the unprivileged host account with systemd hardening and no network address
-family.
+the unprivileged host account with systemd hardening. Its only allowed socket
+families are Unix sockets and the netlink socket Bubblewrap needs to create a
+private, disconnected network namespace.
+
+Ubuntu hosts that enforce restricted unprivileged user namespaces must install
+the repository's narrow AppArmor exception for a dedicated, group-restricted
+Bubblewrap executable. Do not relax the host-wide
+`unprivileged_userns` profile:
+
+```bash
+install -d -o root -g lunaragent -m 0750 /opt/lunar-agent-command-broker/bin
+install -o root -g lunaragent -m 0750 \
+  /usr/bin/bwrap /opt/lunar-agent-command-broker/bin/bwrap
+install -o root -g root -m 0644 \
+  deploy/lunar-agent-command-broker.apparmor \
+  /etc/apparmor.d/lunar-agent-command-broker-bwrap
+apparmor_parser -r /etc/apparmor.d/lunar-agent-command-broker-bwrap
+```
+
+The broker environment must then set
+`LUNAR_AGENT_BWRAP_BINARY=/opt/lunar-agent-command-broker/bin/bwrap`. The
+AppArmor exception is attached only to that root-owned executable, which is
+executable only by the dedicated service group. The systemd unit keeps the
+broker unprivileged with no ambient capabilities; the bounded namespace setup
+capabilities are available only inside Bubblewrap's new user namespace.
 
 ## Backend Wiring
 

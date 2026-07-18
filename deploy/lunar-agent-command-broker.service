@@ -21,7 +21,10 @@ PrivateDevices=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ProtectKernelTunables=yes
+# Bubblewrap mounts a fresh /proc inside each user/PID namespace. Enabling
+# ProtectKernelTunables on the outer service prevents that namespaced mount.
+# The broker is still an unprivileged account with no ambient host capability.
+ProtectKernelTunables=no
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 ProtectClock=yes
@@ -33,9 +36,9 @@ RestrictAddressFamilies=AF_UNIX AF_NETLINK
 RestrictRealtime=yes
 LockPersonality=yes
 # The broker process remains an unprivileged user with no ambient capability.
-# Retaining CAP_NET_ADMIN only in the bounding set lets Bubblewrap configure
-# loopback inside its newly created user/network namespace.
-CapabilityBoundingSet=CAP_NET_ADMIN
+# These entries only keep Bubblewrap's namespace-setup capabilities in the
+# bounding set; they are gained inside its new user namespace, not on the host.
+CapabilityBoundingSet=CAP_SETPCAP CAP_NET_ADMIN CAP_SYS_ADMIN
 AmbientCapabilities=
 ReadWritePaths=/var/lib/lunar-agent/workspaces /run/lunar-agent-command-broker
 MemoryMax=512M

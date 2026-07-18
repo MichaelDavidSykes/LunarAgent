@@ -85,7 +85,10 @@ def _workspace_root() -> Path:
 
 
 def _bubblewrap_binary() -> Path:
-    configured = str(os.getenv("LUNAR_AGENT_BWRAP_BINARY") or "/usr/bin/bwrap").strip()
+    configured = str(
+        os.getenv("LUNAR_AGENT_BWRAP_BINARY")
+        or "/opt/lunar-agent-command-broker/bin/bwrap"
+    ).strip()
     return Path(configured)
 
 
