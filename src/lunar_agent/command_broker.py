@@ -7,10 +7,13 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import signal
 import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import AsyncIterator, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -20,14 +23,18 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="LunarAgent command broker", docs_url=None, redoc_url=None)
 
 _WORKSPACE_ID = re.compile(r"^[a-f0-9]{24}$")
+_WORKSPACE_CLEANUP_PREFIX = ".cleanup-"
 _MAX_CAPTURE_BYTES = 16_000
-_MAX_STREAM_BYTES = 128_000
+_MAX_OUTPUT_BYTES = 128_000
 _COMMAND_CONCURRENCY = asyncio.Semaphore(2)
 _HEALTH_PROBE_LOCK = asyncio.Lock()
+_WORKSPACE_STATE_LOCK = asyncio.Lock()
+_WORKSPACE_CLEANUP_LOCK = asyncio.Lock()
 _HEALTH_PROBE_TTL_SECONDS = 30.0
 _HEALTH_WORKSPACE_ID = "0" * 24
 _HEALTH_MARKER = "LUNAR_AGENT_COMMAND_SANDBOX_READY"
 _last_health_success_monotonic = 0.0
+_last_workspace_cleanup_monotonic = 0.0
 # The host broker and authentication-bearing container share UID 10001 for the
 # protected broker socket (the host workspace itself is not container-mounted).
 # RLIMIT_NPROC is charged across that UID, including Codex/Node threads. Two
@@ -86,6 +93,25 @@ class _OutputLimitExceeded(RuntimeError):
     pass
 
 
+@dataclass
+class _OutputBudget:
+    total: int = 0
+
+    def consume(self, size: int) -> None:
+        self.total += max(0, int(size))
+        if self.total > _MAX_OUTPUT_BYTES:
+            raise _OutputLimitExceeded
+
+
+@dataclass
+class _WorkspaceState:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
+
+
+_workspace_states: dict[str, _WorkspaceState] = {}
+
+
 def _broker_token() -> str:
     return str(os.getenv("LUNAR_AGENT_COMMAND_BROKER_TOKEN") or "").strip()
 
@@ -109,6 +135,38 @@ def _bubblewrap_binary() -> Path:
 def _prlimit_binary() -> Path:
     configured = str(os.getenv("LUNAR_AGENT_PRLIMIT_BINARY") or "/usr/bin/prlimit").strip()
     return Path(configured)
+
+
+def _bounded_environment_seconds(
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        value = int(str(os.getenv(name) or default).strip())
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _workspace_ttl_seconds() -> int:
+    return _bounded_environment_seconds(
+        "LUNAR_AGENT_COMMAND_WORKSPACE_TTL_SECONDS",
+        default=86_400,
+        minimum=3_600,
+        maximum=604_800,
+    )
+
+
+def _workspace_cleanup_interval_seconds() -> int:
+    return _bounded_environment_seconds(
+        "LUNAR_AGENT_COMMAND_WORKSPACE_CLEANUP_INTERVAL_SECONDS",
+        default=300,
+        minimum=30,
+        maximum=3_600,
+    )
 
 
 def _redact_sensitive_text(value: str) -> str:
@@ -173,6 +231,121 @@ def _prepare_workspace(
     return resolved
 
 
+async def _cleanup_stale_workspaces(*, force: bool = False) -> int:
+    global _last_workspace_cleanup_monotonic
+
+    now_monotonic = time.monotonic()
+    if (
+        not force
+        and _last_workspace_cleanup_monotonic > 0
+        and now_monotonic - _last_workspace_cleanup_monotonic
+        < _workspace_cleanup_interval_seconds()
+    ):
+        return 0
+
+    async with _WORKSPACE_CLEANUP_LOCK:
+        now_monotonic = time.monotonic()
+        if (
+            not force
+            and _last_workspace_cleanup_monotonic > 0
+            and now_monotonic - _last_workspace_cleanup_monotonic
+            < _workspace_cleanup_interval_seconds()
+        ):
+            return 0
+
+        root = _workspace_root()
+        if not root.is_dir():
+            return 0
+        cleanup_paths: list[Path] = []
+        cutoff = time.time() - _workspace_ttl_seconds()
+        async with _WORKSPACE_STATE_LOCK:
+            active_workspace_ids = set(_workspace_states)
+            try:
+                candidates = list(root.iterdir())
+            except OSError:
+                return 0
+            for candidate in candidates:
+                name = candidate.name
+                if name.startswith(_WORKSPACE_CLEANUP_PREFIX):
+                    if candidate.is_symlink():
+                        continue
+                    cleanup_paths.append(candidate)
+                    continue
+                if (
+                    name == _HEALTH_WORKSPACE_ID
+                    or name in active_workspace_ids
+                    or not _WORKSPACE_ID.fullmatch(name)
+                    or candidate.is_symlink()
+                ):
+                    continue
+                try:
+                    stat_result = candidate.stat()
+                    resolved = candidate.resolve(strict=True)
+                except OSError:
+                    continue
+                if (
+                    not candidate.is_dir()
+                    or resolved.parent != root
+                    or stat_result.st_mtime >= cutoff
+                ):
+                    continue
+                tombstone = root / (
+                    f"{_WORKSPACE_CLEANUP_PREFIX}{name}-{secrets.token_hex(4)}"
+                )
+                try:
+                    candidate.rename(tombstone)
+                except OSError:
+                    continue
+                cleanup_paths.append(tombstone)
+            _last_workspace_cleanup_monotonic = now_monotonic
+
+        removed = 0
+        for cleanup_path in cleanup_paths:
+            try:
+                if cleanup_path.is_dir() and not cleanup_path.is_symlink():
+                    shutil.rmtree(cleanup_path)
+                else:
+                    cleanup_path.unlink(missing_ok=True)
+                removed += 1
+            except OSError:
+                logger.warning(
+                    "Command workspace cleanup failed workspace=%s",
+                    hashlib.sha256(cleanup_path.name.encode()).hexdigest()[:12],
+                )
+        if removed:
+            logger.info("Removed stale command workspaces count=%s", removed)
+        return removed
+
+
+@asynccontextmanager
+async def _workspace_execution(
+    workspace_id: str,
+    *,
+    allow_health_workspace: bool = False,
+) -> AsyncIterator[Path]:
+    async with _WORKSPACE_STATE_LOCK:
+        state = _workspace_states.setdefault(workspace_id, _WorkspaceState())
+        state.users += 1
+        try:
+            workspace = _prepare_workspace(
+                workspace_id,
+                allow_health_workspace=allow_health_workspace,
+            )
+        except Exception:
+            state.users -= 1
+            if state.users == 0:
+                _workspace_states.pop(workspace_id, None)
+            raise
+    try:
+        async with state.lock:
+            yield workspace
+    finally:
+        async with _WORKSPACE_STATE_LOCK:
+            state.users -= 1
+            if state.users == 0:
+                _workspace_states.pop(workspace_id, None)
+
+
 def _sandbox_argv(workspace: Path, command: str, timeout_seconds: int) -> list[str]:
     cpu_limit = max(2, min(int(timeout_seconds) + 2, 50))
     return [
@@ -235,17 +408,17 @@ def _sandbox_argv(workspace: Path, command: str, timeout_seconds: int) -> list[s
     ]
 
 
-async def _read_bounded(stream: asyncio.StreamReader) -> tuple[str, bool]:
+async def _read_bounded(
+    stream: asyncio.StreamReader,
+    output_budget: _OutputBudget,
+) -> tuple[str, bool]:
     captured = bytearray()
-    total = 0
     truncated = False
     while True:
         chunk = await stream.read(4_096)
         if not chunk:
             break
-        total += len(chunk)
-        if total > _MAX_STREAM_BYTES:
-            raise _OutputLimitExceeded
+        output_budget.consume(len(chunk))
         remaining = _MAX_CAPTURE_BYTES - len(captured)
         if remaining > 0:
             captured.extend(chunk[:remaining])
@@ -265,47 +438,59 @@ async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
     await process.wait()
 
 
+async def _stop_command_process(
+    process: asyncio.subprocess.Process | None,
+    *stream_tasks: asyncio.Task[tuple[str, bool]] | None,
+) -> None:
+    if process is not None:
+        await _kill_process_group(process)
+    pending_tasks = [task for task in stream_tasks if task is not None]
+    for task in pending_tasks:
+        task.cancel()
+    await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+
 async def _run_sandboxed_command(
     workspace: Path,
     command: str,
-    timeout_seconds: int,
+    timeout_seconds: float,
 ) -> CommandResponse:
     started = time.monotonic()
-    process = await asyncio.create_subprocess_exec(
-        *_sandbox_argv(workspace, command, timeout_seconds),
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-    )
-    if process.stdout is None or process.stderr is None:
-        await _kill_process_group(process)
-        raise RuntimeError("Command broker streams are unavailable")
-
-    stdout_task = asyncio.create_task(_read_bounded(process.stdout))
-    stderr_task = asyncio.create_task(_read_bounded(process.stderr))
+    process: asyncio.subprocess.Process | None = None
+    stdout_task: asyncio.Task[tuple[str, bool]] | None = None
+    stderr_task: asyncio.Task[tuple[str, bool]] | None = None
     try:
         async with asyncio.timeout(timeout_seconds):
+            process = await asyncio.create_subprocess_exec(
+                *_sandbox_argv(workspace, command, timeout_seconds),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            if process.stdout is None or process.stderr is None:
+                raise RuntimeError("Command broker streams are unavailable")
+            output_budget = _OutputBudget()
+            stdout_task = asyncio.create_task(
+                _read_bounded(process.stdout, output_budget)
+            )
+            stderr_task = asyncio.create_task(
+                _read_bounded(process.stderr, output_budget)
+            )
             exit_code, stdout_result, stderr_result = await asyncio.gather(
                 process.wait(),
                 stdout_task,
                 stderr_task,
             )
     except TimeoutError:
-        await _kill_process_group(process)
-        stdout_task.cancel()
-        stderr_task.cancel()
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        await _stop_command_process(process, stdout_task, stderr_task)
         return CommandResponse(
             status="timed_out",
             durationMs=int((time.monotonic() - started) * 1_000),
             stderr="The workspace command exceeded its execution deadline.",
         )
     except _OutputLimitExceeded:
-        await _kill_process_group(process)
-        stdout_task.cancel()
-        stderr_task.cancel()
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        await _stop_command_process(process, stdout_task, stderr_task)
         return CommandResponse(
             status="output_limited",
             durationMs=int((time.monotonic() - started) * 1_000),
@@ -313,10 +498,10 @@ async def _run_sandboxed_command(
             outputTruncated=True,
         )
     except asyncio.CancelledError:
-        await _kill_process_group(process)
-        stdout_task.cancel()
-        stderr_task.cancel()
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        await _stop_command_process(process, stdout_task, stderr_task)
+        raise
+    except Exception:
+        await _stop_command_process(process, stdout_task, stderr_task)
         raise
 
     stdout, stdout_truncated = stdout_result
@@ -365,12 +550,14 @@ async def _verify_sandbox_execution() -> None:
             and now - _last_health_success_monotonic < _HEALTH_PROBE_TTL_SECONDS
         ):
             return
-        workspace = _prepare_workspace(
-            _HEALTH_WORKSPACE_ID,
-            allow_health_workspace=True,
-        )
         try:
-            async with _COMMAND_CONCURRENCY:
+            async with _workspace_execution(
+                _HEALTH_WORKSPACE_ID,
+                allow_health_workspace=True,
+            ) as workspace:
+                # Readiness must remain executable under the supported load of
+                # two user commands. The dedicated health lock bounds this to
+                # one additional short probe without consuming a user slot.
                 result = await _run_sandboxed_command(
                     workspace,
                     _health_probe_command(),
@@ -411,6 +598,7 @@ async def live() -> dict[str, str]:
         raise HTTPException(status_code=503, detail="Command sandbox is unavailable")
     if not _workspace_root().is_dir():
         raise HTTPException(status_code=503, detail="Command workspace is unavailable")
+    await _cleanup_stale_workspaces()
     await _verify_sandbox_execution()
     return {
         "status": "ok",
@@ -425,19 +613,46 @@ async def live() -> dict[str, str]:
     dependencies=[Depends(_require_token)],
 )
 async def run_command(request: CommandRequest) -> CommandResponse:
-    workspace = _prepare_workspace(request.workspaceId)
     command = request.command.strip()
     if not command or "\x00" in command:
         raise HTTPException(status_code=400, detail="Invalid workspace command")
     command_fingerprint = hashlib.sha256(command.encode()).hexdigest()[:12]
     workspace_fingerprint = hashlib.sha256(request.workspaceId.encode()).hexdigest()[:12]
-    async with _COMMAND_CONCURRENCY:
-        result = await _run_sandboxed_command(
-            workspace,
-            command,
-            request.timeoutSeconds,
+    await _cleanup_stale_workspaces()
+    started = time.monotonic()
+    try:
+        async with asyncio.timeout(request.timeoutSeconds):
+            async with _workspace_execution(request.workspaceId) as workspace:
+                async with _COMMAND_CONCURRENCY:
+                    remaining_seconds = max(
+                        0.05,
+                        request.timeoutSeconds - (time.monotonic() - started),
+                    )
+                    result = await _run_sandboxed_command(
+                        workspace,
+                        command,
+                        remaining_seconds,
+                    )
+                os.utime(workspace, None)
+    except TimeoutError:
+        result = CommandResponse(
+            status="timed_out",
+            durationMs=int((time.monotonic() - started) * 1_000),
+            stderr="The workspace command exceeded its execution deadline.",
         )
-    os.utime(workspace, None)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Workspace command unavailable workspace=%s command=%s error=%s",
+            workspace_fingerprint,
+            command_fingerprint,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Command sandbox is unavailable",
+        ) from exc
     logger.info(
         "Workspace command completed workspace=%s command=%s status=%s exit_code=%s duration_ms=%s",
         workspace_fingerprint,

@@ -158,10 +158,16 @@ The broker and Agent container share UID `10001` for the protected broker socket
 but the host command-workspace root is deliberately not mounted into the Agent
 container. The broker lazily creates the opaque host workspace on the first
 command, while Codex receives a separate session cwd on the container's private
-`/tmp`. A turn therefore cannot inspect a sibling session's command files. The
-per-command process ceiling accounts for Codex threads charged to the shared
-UID, while the broker's independent systemd `TasksMax` cgroup stays the tighter
-process boundary for command execution.
+`/tmp`. A turn therefore cannot inspect a sibling session's command files.
+Commands for the same investigation workspace are serialized, while commands
+for two different investigations may use the bounded global concurrency in
+parallel. Inactive host workspaces are removed after 24 hours by default;
+`LUNAR_AGENT_COMMAND_WORKSPACE_TTL_SECONDS` and
+`LUNAR_AGENT_COMMAND_WORKSPACE_CLEANUP_INTERVAL_SECONDS` can narrow or extend
+that bounded temporary retention. Active and executable-health workspaces are
+never removed. The per-command process ceiling accounts for Codex threads
+charged to the shared UID, while the broker's independent systemd `TasksMax`
+cgroup stays the tighter process boundary for command execution.
 
 Callers must send the configured `LUNAR_AGENT_SHARED_TOKEN`:
 
@@ -190,6 +196,10 @@ Agent container boundary and adds only the read-only socket mount. The broker it
 the unprivileged host account with systemd hardening. Its only allowed socket
 families are Unix sockets and the netlink socket Bubblewrap needs to create a
 private, disconnected network namespace.
+The Agent unit is bound to and part of the broker unit's restart lifecycle. A
+broker restart therefore also recreates the Agent container, remounting the
+current Unix-socket directory and reloading a rotated broker token instead of
+leaving a stale socket or credential in a long-lived container.
 
 Ubuntu hosts that enforce restricted unprivileged user namespaces must install
 the repository's narrow AppArmor exception for a dedicated, group-restricted

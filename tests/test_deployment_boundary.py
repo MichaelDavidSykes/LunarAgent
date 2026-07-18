@@ -20,6 +20,9 @@ def test_agent_container_cannot_mount_host_command_workspaces() -> None:
         "--volume /run/lunar-agent-command-broker:"
         "/run/lunar-agent-command-broker:ro"
     ) in unit
+    assert "Requires=lunar-agent-command-broker.service" in unit
+    assert "BindsTo=lunar-agent-command-broker.service" in unit
+    assert "PartOf=lunar-agent-command-broker.service" in unit
 
 
 def test_broker_owns_the_only_host_command_workspace_mount() -> None:
