@@ -149,6 +149,10 @@ a fresh Bubblewrap namespace with:
 The Agent health route fails closed when this command sandbox is unavailable.
 The runtime never treats a failed command as verified, and the final response
 receives a deterministic warning if a model attempts to claim otherwise.
+The broker and Agent container share only UID `10001` and the workspace/socket
+mounts. The per-command process ceiling accounts for Codex threads charged to
+that shared UID, while the broker's independent systemd `TasksMax` cgroup stays
+the tighter process boundary for command execution.
 
 Callers must send the configured `LUNAR_AGENT_SHARED_TOKEN`:
 

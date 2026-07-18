@@ -22,6 +22,13 @@ _WORKSPACE_ID = re.compile(r"^[a-f0-9]{24}$")
 _MAX_CAPTURE_BYTES = 16_000
 _MAX_STREAM_BYTES = 128_000
 _COMMAND_CONCURRENCY = asyncio.Semaphore(2)
+# The host broker and the authentication-bearing container intentionally share
+# UID 10001 so both can access an opaque session workspace. RLIMIT_NPROC is
+# charged across that UID, including Codex/Node threads. Two active Codex turns
+# can therefore exceed a traditional per-command limit of 64 before Bubblewrap
+# starts. The broker's systemd TasksMax=160 remains the tighter command-service
+# cgroup boundary; this UID-wide limit prevents false namespace failures.
+_COMMAND_NPROC_LIMIT = 256
 _SENSITIVE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
@@ -137,7 +144,7 @@ def _sandbox_argv(workspace: Path, command: str, timeout_seconds: int) -> list[s
         str(_prlimit_binary()),
         f"--cpu={cpu_limit}",
         "--as=536870912",
-        "--nproc=64",
+        f"--nproc={_COMMAND_NPROC_LIMIT}",
         "--nofile=64",
         "--fsize=20971520",
         "--core=0",

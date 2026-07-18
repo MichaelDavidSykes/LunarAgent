@@ -49,6 +49,7 @@ def test_command_broker_uses_only_the_resolved_workspace_and_networkless_bwrap(
     argv = command_broker._sandbox_argv(workspace, "printf ok", 5)
 
     assert "--unshare-net" in argv
+    assert "--nproc=256" in argv
     assert ["--bind", str(workspace), "/workspace"] == argv[
         argv.index("--bind") : argv.index("--bind") + 3
     ]
