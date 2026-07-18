@@ -102,6 +102,17 @@ class ExplorerAgentRespondResponse(BaseModel):
     citations: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
 
 
+class ExplorerAgentCancelRequest(BaseModel):
+    sessionId: str = Field(..., min_length=1, max_length=120)
+    requestId: str = Field(..., min_length=1, max_length=120)
+
+
+class ExplorerAgentCancelResponse(BaseModel):
+    sessionId: str
+    requestId: str
+    cancelled: bool
+
+
 class SafeRouteAreaRiskResearchRequest(BaseModel):
     sessionId: str | None = Field(default=None, max_length=120)
     aoi: dict[str, Any] = Field(

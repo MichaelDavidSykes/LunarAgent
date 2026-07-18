@@ -7,6 +7,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 
 from .config import settings
 from .models import (
+    ExplorerAgentCancelRequest,
+    ExplorerAgentCancelResponse,
     ExplorerAgentRespondRequest,
     ExplorerAgentRespondResponse,
     SafeRouteAreaRiskResearchRequest,
@@ -14,6 +16,11 @@ from .models import (
 )
 from .codex_agent import codex_auth_status, run_explorer_codex_turn
 from .service import research_safe_route_area_risk
+from .turn_registry import (
+    ExplorerTurnRegistry,
+    TurnAlreadyActiveError,
+    TurnCancelledError,
+)
 
 app = FastAPI(title=settings.project_name)
 logger = logging.getLogger(__name__)
@@ -23,6 +30,7 @@ _codex_request_semaphore = asyncio.Semaphore(
 )
 _quota_lock = asyncio.Lock()
 _quota_events: dict[str, list[float]] = {}
+_explorer_turn_registry = ExplorerTurnRegistry()
 
 
 async def enforce_request_quota(quota_key: str | None, category: str) -> None:
@@ -126,14 +134,45 @@ async def explorer_agent_health() -> dict:
 
 @app.post("/v1/explorer-agent/respond", response_model=ExplorerAgentRespondResponse, dependencies=[Depends(require_token)])
 async def explorer_agent_respond(request: ExplorerAgentRespondRequest) -> ExplorerAgentRespondResponse:
+    session_id = str(request.sessionId or "").strip()
+    request_id = str(request.requestId or "").strip()
+    task = asyncio.current_task()
+    registered = bool(session_id and request_id and task is not None)
     try:
+        if registered:
+            await _explorer_turn_registry.register(session_id, request_id, task)
         await enforce_request_quota(request.quotaKey, "explorer")
         async with _codex_request_semaphore:
             return await run_explorer_codex_turn(request)
+    except TurnCancelledError as exc:
+        raise HTTPException(status_code=409, detail="Explorer agent turn was cancelled.") from exc
+    except TurnAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail="Explorer agent turn is already active.") from exc
+    except asyncio.CancelledError as exc:
+        raise HTTPException(status_code=409, detail="Explorer agent turn was cancelled.") from exc
     except HTTPException:
         raise
     except Exception as exc:
         raise_internal_server_error(exc, "Explorer agent response failed.")
+    finally:
+        if registered:
+            await _explorer_turn_registry.unregister(session_id, request_id, task)
+
+
+@app.post(
+    "/v1/explorer-agent/cancel",
+    response_model=ExplorerAgentCancelResponse,
+    dependencies=[Depends(require_token)],
+)
+async def explorer_agent_cancel(
+    request: ExplorerAgentCancelRequest,
+) -> ExplorerAgentCancelResponse:
+    result = await _explorer_turn_registry.cancel(request.sessionId, request.requestId)
+    return ExplorerAgentCancelResponse(
+        sessionId=request.sessionId,
+        requestId=request.requestId,
+        cancelled=result.active,
+    )
 
 
 @app.post(
