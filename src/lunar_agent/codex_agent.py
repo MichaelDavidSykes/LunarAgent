@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import signal
 import shutil
 import time
 from pathlib import Path
@@ -278,15 +279,35 @@ async def _emit_runtime_failure(
         logger.debug("LunarAgent could not forward the safe runtime failure event", exc_info=True)
 
 
-async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+async def _terminate_process(
+    process: asyncio.subprocess.Process,
+    *,
+    process_group: bool = False,
+) -> None:
     if process.returncode is not None:
         return
-    process.terminate()
+
+    def send_signal(sig: signal.Signals) -> None:
+        try:
+            if process_group:
+                os.killpg(process.pid, sig)
+            else:
+                process.send_signal(sig)
+        except ProcessLookupError:
+            pass
+
+    send_signal(signal.SIGTERM)
     try:
         await asyncio.wait_for(process.wait(), timeout=5)
     except asyncio.TimeoutError:
-        process.kill()
+        send_signal(signal.SIGKILL)
         await process.wait()
+    else:
+        # The process-group leader can exit before an MCP or Codex child that
+        # ignored SIGTERM. A final group signal closes that race without
+        # affecting the Agent because every runner is a dedicated session.
+        if process_group:
+            send_signal(signal.SIGKILL)
 
 
 def _project_root() -> Path:
@@ -523,6 +544,7 @@ async def run_explorer_codex_turn(
             env=_safe_runner_env(),
             cwd=str(_project_root()),
             limit=_MAX_RUNNER_LINE_BYTES + 1,
+            start_new_session=True,
         )
     except Exception as exc:
         code = _runtime_failure_code(exc)
@@ -537,7 +559,7 @@ async def run_explorer_codex_turn(
         )
         raise ExplorerCodexRuntimeError(code) from exc
     if process.stdin is None or process.stdout is None or process.stderr is None:
-        process.kill()
+        await _terminate_process(process, process_group=True)
         raise RuntimeError("Codex runtime streams could not be opened")
 
     process.stdin.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
@@ -574,7 +596,7 @@ async def run_explorer_codex_turn(
                     result = message
             await process.wait()
     except asyncio.CancelledError:
-        await _terminate_process(process)
+        await _terminate_process(process, process_group=True)
         telemetry_logger.info(
             "Explorer Codex turn cancelled session=%s request=%s duration_ms=%s",
             session_fingerprint,
@@ -584,7 +606,7 @@ async def run_explorer_codex_turn(
         raise
     except Exception as exc:
         failure = exc
-        await _terminate_process(process)
+        await _terminate_process(process, process_group=True)
     finally:
         stderr = await stderr_task
 

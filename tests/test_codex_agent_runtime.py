@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
+import time
 
 import httpx
 import pytest
@@ -612,3 +615,79 @@ setInterval(() => {{}}, 1000);
     asyncio.run(scenario())
 
     assert stopped.read_text(encoding="utf-8") == "stopped"
+
+
+def test_runtime_cancellation_terminates_runner_process_group(tmp_path, monkeypatch):
+    runner = tmp_path / "waiting-runner-with-child.mjs"
+    ready = tmp_path / "ready.txt"
+    runner_stopped = tmp_path / "runner-stopped.txt"
+    child_stopped = tmp_path / "child-stopped.txt"
+    runner.write_text(
+        f"""
+import fs from "node:fs";
+import {{ spawn }} from "node:child_process";
+const childScript = `
+  const fs = require("node:fs");
+  process.once("SIGTERM", () => {{
+    fs.writeFileSync({str(child_stopped)!r}, "stopped");
+  }});
+  fs.writeFileSync({str(ready)!r}, String(process.pid));
+  setInterval(() => {{}}, 1000);
+`;
+const child = spawn(process.execPath, ["-e", childScript], {{
+  stdio: "ignore",
+}});
+process.once("SIGTERM", () => {{
+  fs.writeFileSync({str(runner_stopped)!r}, "stopped");
+  setTimeout(() => process.exit(0), 100);
+}});
+setInterval(() => {{}}, 1000);
+""".strip(),
+        encoding="utf-8",
+    )
+    mcp = tmp_path / "fake-mcp.mjs"
+    mcp.write_text("// exists for runtime validation", encoding="utf-8")
+    monkeypatch.setattr(codex_module, "_runner_path", lambda: runner)
+    monkeypatch.setattr(codex_module, "_mcp_server_path", lambda: mcp)
+    monkeypatch.setattr(
+        codex_module.settings,
+        "codex_agent_workspace_root",
+        str(tmp_path / "work"),
+    )
+
+    async def bootstrap(_request):
+        return {
+            "token": "delegated-read-only-token",
+            "toolsUrl": "https://backend.example.test/api/v1/graph/ai-agent/codex-tools",
+        }
+
+    async def scenario():
+        task = asyncio.create_task(
+            codex_module.run_explorer_codex_turn(
+                _request(),
+                graph_bootstrap=bootstrap,
+            )
+        )
+        for _ in range(100):
+            if ready.exists():
+                break
+            await asyncio.sleep(0.02)
+        assert ready.exists()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert runner_stopped.read_text(encoding="utf-8") == "stopped"
+    assert child_stopped.read_text(encoding="utf-8") == "stopped"
+    child_pid = int(ready.read_text(encoding="utf-8"))
+    for _ in range(100):
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
+    else:
+        os.kill(child_pid, signal.SIGKILL)
+        pytest.fail("Runner child survived cancellation")
