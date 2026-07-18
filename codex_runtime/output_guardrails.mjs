@@ -96,6 +96,57 @@ export function safePublicUrl(value) {
   return parsed.toString().slice(0, 2000);
 }
 
+function citationUrlField(key) {
+  const normalized = String(key || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+  return (
+    normalized === "source" ||
+    normalized.includes("url") ||
+    normalized.endsWith("uri") ||
+    normalized.endsWith("link")
+  );
+}
+
+export function collectCitationEvidenceUrls(value) {
+  const urls = new Set();
+  const visited = new WeakSet();
+  let visitedNodes = 0;
+
+  function visit(candidate, key = "", depth = 0) {
+    if (
+      candidate == null ||
+      depth > 7 ||
+      visitedNodes >= 2000 ||
+      urls.size >= MAX_CITATION_ITEMS * 2
+    ) {
+      return;
+    }
+    visitedNodes += 1;
+    if (typeof candidate === "string") {
+      if (!citationUrlField(key)) return;
+      const safe = safePublicUrl(candidate);
+      if (safe) urls.add(safe);
+      return;
+    }
+    if (typeof candidate !== "object") return;
+    if (visited.has(candidate)) return;
+    visited.add(candidate);
+    if (Array.isArray(candidate)) {
+      for (const item of candidate.slice(0, 200)) {
+        visit(item, key, depth + 1);
+      }
+      return;
+    }
+    for (const [childKey, childValue] of Object.entries(candidate).slice(0, 200)) {
+      visit(childValue, childKey, depth + 1);
+    }
+  }
+
+  visit(value);
+  return [...urls];
+}
+
 function normalizeCitation(candidate, index) {
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
   const title = cleanText(candidate.title, 400, { singleLine: true });
@@ -197,8 +248,20 @@ function normalizeExplorerAction(candidate) {
   };
 }
 
-export function normalizeStructuredResult(raw, { allowUiActions = false } = {}) {
+export function normalizeStructuredResult(
+  raw,
+  {
+    allowUiActions = false,
+    citationEvidenceUrls = [],
+    nativeWebSearchCompleted = false,
+  } = {},
+) {
   sensitiveTextRemoved = 0;
+  const evidenceUrls = new Set(
+    Array.from(citationEvidenceUrls || [])
+      .map((value) => safePublicUrl(value))
+      .filter(Boolean),
+  );
   let parsed;
   try {
     parsed = JSON.parse(String(raw || ""));
@@ -218,7 +281,11 @@ export function normalizeStructuredResult(raw, { allowUiActions = false } = {}) 
         entitiesReceived: 0,
         entitiesAccepted: 0,
         citationsReceived: 0,
+        citationsUrlSafe: 0,
         citationsAccepted: 0,
+        citationsAcceptedFromToolEvidence: 0,
+        citationsAcceptedFromNativeWeb: 0,
+        citationsRemovedNoEvidence: 0,
         entityActionsReplaced: 0,
         explorerActionsReceived: 0,
         explorerActionsAccepted: 0,
@@ -244,9 +311,23 @@ export function normalizeStructuredResult(raw, { allowUiActions = false } = {}) 
     : [];
   const citations = [];
   const citationUrls = new Set();
+  let citationsUrlSafe = 0;
+  let citationsAcceptedFromToolEvidence = 0;
+  let citationsAcceptedFromNativeWeb = 0;
   for (const [index, candidate] of rawCitations.entries()) {
     const normalized = normalizeCitation(candidate, index);
     if (!normalized || citationUrls.has(normalized.url)) continue;
+    citationsUrlSafe += 1;
+    if (evidenceUrls.has(normalized.url)) {
+      citationsAcceptedFromToolEvidence += 1;
+    } else if (nativeWebSearchCompleted) {
+      // The official Codex SDK reports that live search completed but does not
+      // expose the result URLs. Retain URL-safe model citations only in that
+      // explicitly recorded case; never imply an exact URL-to-result binding.
+      citationsAcceptedFromNativeWeb += 1;
+    } else {
+      continue;
+    }
     citationUrls.add(normalized.url);
     citations.push(normalized);
   }
@@ -272,7 +353,11 @@ export function normalizeStructuredResult(raw, { allowUiActions = false } = {}) 
       entitiesReceived: rawEntities.length,
       entitiesAccepted: entities.length,
       citationsReceived: rawCitations.length,
+      citationsUrlSafe,
       citationsAccepted: citations.length,
+      citationsAcceptedFromToolEvidence,
+      citationsAcceptedFromNativeWeb,
+      citationsRemovedNoEvidence: citationsUrlSafe - citations.length,
       entityActionsReplaced: entities.length,
       explorerActionsReceived: rawActions.length,
       explorerActionsAccepted: actions.length,
