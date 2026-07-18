@@ -105,8 +105,12 @@ test("MCP bridge exits when its owning runner disappears", async (context) => {
 test("citations require completed research or exact tool-result URL evidence", () => {
   assert.match(runner, /nativeWebSearchesCompleted/);
   assert.match(runner, /collectCitationEvidenceUrls/);
+  assert.match(runner, /collectGraphCitationEvidence/);
   assert.match(runner, /citationEvidenceUrls/);
+  assert.match(runner, /item\.tool === "get_graph_report"/);
+  assert.match(runner, /graphCitationEvidence: \[\.\.\.graphCitationEvidence\.values\(\)\]/);
   assert.match(runner, /sourcesBoundToToolEvidence/);
+  assert.match(runner, /sourcesAddedFromInspectedGraphReports/);
   assert.match(runner, /sourcesRemovedWithoutEvidence/);
 });
 

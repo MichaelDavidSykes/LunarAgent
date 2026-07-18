@@ -52,7 +52,13 @@ Security boundaries:
   page-level binding than the SDK provides. Arbitrary `url` fields and URLs
   embedded only in untrusted report prose are not promoted to citation
   evidence. Citation URLs also reject single-label/internal hosts, private or
-  link-local addresses, and IPv4-mapped/private IPv6 forms;
+  link-local addresses, and IPv4-mapped/private IPv6 forms. When Codex omits a
+  structured citation after directly inspecting an authorized
+  `get_graph_report` result, the guardrail retains that report's exact direct
+  `sourceLink`, title, source name, and valid timestamp as a deterministic
+  citation. This path never reads search-result lists, arbitrary metadata,
+  nested entity links, snippets, report prose, or custom-query output, and it
+  re-requires the URL in the existing completed-tool evidence allowlist;
 - interactive entities fail closed unless the exact canonical graph document
   ID, label, and type appeared in the current turn's completed curated graph
   search or report-detail result. The evidence-authoritative type replaces any

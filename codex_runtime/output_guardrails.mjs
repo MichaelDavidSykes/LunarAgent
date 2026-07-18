@@ -3,6 +3,7 @@ import { redactSensitiveTextWithCount } from "./sensitive_text.mjs";
 const MAX_FINAL_RESPONSE_CHARS = 60000;
 const MAX_ENTITY_ITEMS = 100;
 const MAX_CITATION_ITEMS = 100;
+const MAX_GRAPH_EVIDENCE_CITATIONS = 6;
 const ALLOWED_EXPLORER_ACTIONS = new Set([
   "focus_country",
   "clear_country_focus",
@@ -185,6 +186,34 @@ export function collectCitationEvidenceUrls(value) {
 
   visit(value);
   return [...urls];
+}
+
+export function collectGraphCitationEvidence(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const report = value.report;
+  if (!report || typeof report !== "object" || Array.isArray(report)) return [];
+
+  const url = safePublicUrl(report.sourceLink);
+  const title = cleanText(report.name, 400, { singleLine: true });
+  if (!url || !title || suspiciousInstructionText(title)) return [];
+
+  const sourceName = cleanText(report.sourceName, 200, { singleLine: true });
+  const publishedAt = cleanText(report.modified, 80, { singleLine: true });
+  return [{
+    title,
+    url,
+    sourceName:
+      sourceName && !suspiciousInstructionText(sourceName)
+        ? sourceName
+        : null,
+    publishedAt:
+      publishedAt && !Number.isNaN(Date.parse(publishedAt))
+        ? publishedAt
+        : null,
+    // Report prose is untrusted evidence. It is intentionally not copied into
+    // deterministic citations even when the graph tool returned a snippet.
+    snippet: null,
+  }];
 }
 
 export function collectGraphEntityEvidence(value) {
@@ -376,6 +405,7 @@ export function normalizeStructuredResult(
   {
     allowUiActions = false,
     citationEvidenceUrls = [],
+    graphCitationEvidence = [],
     graphEntityEvidence = [],
     nativeWebSearchCompleted = false,
   } = {},
@@ -437,6 +467,7 @@ export function normalizeStructuredResult(
         citationsAccepted: 0,
         citationsAcceptedFromToolEvidence: 0,
         citationsAcceptedFromNativeWeb: 0,
+        citationsAddedFromGraphEvidence: 0,
         citationsRemovedNoEvidence: 0,
         entityActionsReplaced: 0,
         explorerActionsReceived: 0,
@@ -500,6 +531,62 @@ export function normalizeStructuredResult(
     citationUrls.add(normalized.url);
     citations.push(normalized);
   }
+  const modelCitationsAccepted = citations.length;
+  const citationIds = new Set(citations.map((citation) => citation.id));
+  let citationsAddedFromGraphEvidence = 0;
+  const rawGraphCitationEvidence = Array.isArray(graphCitationEvidence)
+    ? graphCitationEvidence.slice(0, MAX_GRAPH_EVIDENCE_CITATIONS)
+    : [];
+  for (const [index, candidate] of rawGraphCitationEvidence.entries()) {
+    if (
+      citations.length >= MAX_CITATION_ITEMS ||
+      citationsAddedFromGraphEvidence >= MAX_GRAPH_EVIDENCE_CITATIONS ||
+      !candidate ||
+      typeof candidate !== "object" ||
+      Array.isArray(candidate)
+    ) {
+      continue;
+    }
+    const title = cleanText(candidate.title, 400, { singleLine: true });
+    if (!title || suspiciousInstructionText(title)) continue;
+    const sourceName = cleanText(candidate.sourceName, 200, { singleLine: true });
+    const publishedAt = cleanText(candidate.publishedAt, 80, { singleLine: true });
+    let citationId = `graph-source-${index + 1}`;
+    let collisionIndex = 1;
+    while (citationIds.has(citationId)) {
+      citationId = `graph-source-${index + 1}-${collisionIndex}`;
+      collisionIndex += 1;
+    }
+    const normalized = normalizeCitation(
+      {
+        id: citationId,
+        title,
+        url: candidate.url,
+        sourceName:
+          sourceName && !suspiciousInstructionText(sourceName)
+            ? sourceName
+            : null,
+        publishedAt:
+          publishedAt && !Number.isNaN(Date.parse(publishedAt))
+            ? publishedAt
+            : null,
+        snippet: null,
+      },
+      index,
+    );
+    if (
+      !normalized ||
+      !evidenceUrls.has(normalized.url) ||
+      citationUrls.has(normalized.url)
+    ) {
+      continue;
+    }
+    citationUrls.add(normalized.url);
+    citationIds.add(normalized.id);
+    citations.push(normalized);
+    citationsAcceptedFromToolEvidence += 1;
+    citationsAddedFromGraphEvidence += 1;
+  }
   const rawActions = Array.isArray(parsed.actions) ? parsed.actions.slice(0, 4) : [];
   const actions = allowUiActions
     ? rawActions.map(normalizeExplorerAction).filter(Boolean).slice(0, 4)
@@ -527,7 +614,9 @@ export function normalizeStructuredResult(
       citationsAccepted: citations.length,
       citationsAcceptedFromToolEvidence,
       citationsAcceptedFromNativeWeb,
-      citationsRemovedNoEvidence: citationsUrlSafe - citations.length,
+      citationsAddedFromGraphEvidence,
+      citationsRemovedNoEvidence:
+        Math.max(0, citationsUrlSafe - modelCitationsAccepted),
       entityActionsReplaced: entities.length,
       explorerActionsReceived: rawActions.length,
       explorerActionsAccepted: actions.length,
