@@ -166,6 +166,11 @@ secrets, and rejection of IP sockets rather than reporting ready from binary
 presence alone.
 The runtime never treats a failed command as verified, and the final response
 receives a deterministic warning if a model attempts to claim otherwise.
+When a Codex turn is stopped, terminating the Agent-side runner closes its
+Unix-socket command request. The broker monitors that request connection across
+queueing and execution; a disconnect cancels and reaps the complete Bubblewrap
+process group instead of allowing a previously started command to continue
+after the Explorer session is cancelled.
 The broker and Agent container share UID `10001` for the protected broker socket,
 but the host command-workspace root is deliberately not mounted into the Agent
 container. The broker lazily creates the opaque host workspace on the first
