@@ -28,7 +28,11 @@ ProtectKernelTunables=no
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 ProtectClock=yes
-ProtectHostname=yes
+# A systemd-owned UTS namespace prevents Bubblewrap from mounting the fresh
+# /proc required by its child PID namespace. The unprivileged broker has no
+# host capability to change the hostname; each command still gets a private UTS
+# namespace and fixed hostname from Bubblewrap.
+ProtectHostname=no
 # Bubblewrap needs AF_NETLINK while creating the command's private network
 # namespace; the sandboxed command itself still receives only that isolated
 # namespace and cannot reach the host or public network.
