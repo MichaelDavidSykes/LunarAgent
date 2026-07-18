@@ -89,8 +89,13 @@ Output:
 }
 ```
 
-`GET /v1/explorer-agent/health` verifies the Explorer runtime, backend bridge, and
-mounted ChatGPT-managed Codex authentication.
+`GET /v1/explorer-agent/health` verifies the Explorer runtime, backend bridge,
+and mounted ChatGPT-managed Codex authentication. Readiness runs the official
+`codex login status` check and accepts only the ChatGPT login method, never an
+API-key login. If a turn reports an authentication failure, readiness stays
+fail-closed for that credential-file generation until Codex authentication is
+reconnected or rotated; a short probe cache prevents a process launch per
+concurrent health request.
 
 ## Environment
 

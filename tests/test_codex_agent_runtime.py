@@ -12,6 +12,8 @@ from lunar_agent.models import ExplorerAgentRespondRequest
 
 @pytest.fixture(autouse=True)
 def configured_command_broker(monkeypatch):
+    monkeypatch.setattr(codex_module, "_codex_auth_failure_fingerprint", None)
+    monkeypatch.setattr(codex_module, "_codex_auth_probe_cache", None)
     monkeypatch.setattr(
         codex_module.settings,
         "command_broker_socket",
@@ -22,6 +24,117 @@ def configured_command_broker(monkeypatch):
         "command_broker_token",
         "broker-test-token",
     )
+
+
+def test_codex_auth_status_probes_exact_chatgpt_login_method(
+    tmp_path,
+    monkeypatch,
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    cli = tmp_path / "codex.js"
+    cli.write_text(
+        'process.stdout.write("Logged in using ChatGPT\\n");',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(codex_module.settings, "codex_home", str(codex_home))
+    monkeypatch.setattr(codex_module.settings, "codex_cli_path", str(cli))
+
+    status = asyncio.run(codex_module.codex_auth_status())
+
+    assert status == {
+        "configured": True,
+        "mode": "chatgpt",
+        "detail": "ChatGPT-managed Codex authentication",
+    }
+
+
+def test_codex_auth_status_rejects_api_key_login(
+    tmp_path,
+    monkeypatch,
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    cli = tmp_path / "codex.js"
+    cli.write_text(
+        'process.stdout.write("Logged in using an API key\\n");',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(codex_module.settings, "codex_home", str(codex_home))
+    monkeypatch.setattr(codex_module.settings, "codex_cli_path", str(cli))
+
+    status = asyncio.run(codex_module.codex_auth_status())
+
+    assert status == {
+        "configured": False,
+        "mode": "chatgpt",
+        "detail": "ChatGPT-managed Codex authentication is unavailable",
+    }
+
+
+def test_codex_auth_failure_stays_unready_until_credentials_rotate(
+    tmp_path,
+    monkeypatch,
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    auth_file = codex_home / "auth.json"
+    auth_file.write_text('{"generation":1}', encoding="utf-8")
+    cli = tmp_path / "codex.js"
+    cli.write_text(
+        'process.stdout.write("Logged in using ChatGPT\\n");',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(codex_module.settings, "codex_home", str(codex_home))
+    monkeypatch.setattr(codex_module.settings, "codex_cli_path", str(cli))
+    codex_module._mark_codex_auth_unavailable()
+
+    unavailable = asyncio.run(codex_module.codex_auth_status())
+
+    assert unavailable == {
+        "configured": False,
+        "mode": "chatgpt",
+        "detail": "ChatGPT-managed Codex authentication must be reconnected",
+    }
+
+    auth_file.write_text('{"generation":2,"rotated":true}', encoding="utf-8")
+    recovered = asyncio.run(codex_module.codex_auth_status())
+
+    assert recovered["configured"] is True
+    assert recovered["mode"] == "chatgpt"
+    assert codex_module._codex_auth_failure_fingerprint is None
+
+
+def test_codex_auth_probe_is_briefly_cached_and_busted_by_rotation(
+    tmp_path,
+    monkeypatch,
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    auth_file = codex_home / "auth.json"
+    auth_file.write_text('{"generation":1}', encoding="utf-8")
+    cli = tmp_path / "codex.js"
+    cli.write_text("// present", encoding="utf-8")
+    probe_count = 0
+
+    async def chatgpt_login():
+        nonlocal probe_count
+        probe_count += 1
+        return "chatgpt"
+
+    monkeypatch.setattr(codex_module.settings, "codex_home", str(codex_home))
+    monkeypatch.setattr(codex_module.settings, "codex_cli_path", str(cli))
+    monkeypatch.setattr(codex_module, "_codex_login_method", chatgpt_login)
+
+    assert asyncio.run(codex_module.codex_auth_status())["configured"] is True
+    assert asyncio.run(codex_module.codex_auth_status())["configured"] is True
+    assert probe_count == 1
+
+    auth_file.write_text('{"generation":2,"rotated":true}', encoding="utf-8")
+    assert asyncio.run(codex_module.codex_auth_status())["configured"] is True
+    assert probe_count == 2
 
 
 def _request() -> ExplorerAgentRespondRequest:
@@ -326,8 +439,12 @@ process.exit(1);
     )
     mcp = tmp_path / "fake-mcp.mjs"
     mcp.write_text("// exists for runtime validation", encoding="utf-8")
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(codex_module, "_runner_path", lambda: runner)
     monkeypatch.setattr(codex_module, "_mcp_server_path", lambda: mcp)
+    monkeypatch.setattr(codex_module.settings, "codex_home", str(codex_home))
     monkeypatch.setattr(codex_module.settings, "codex_agent_workspace_root", str(tmp_path / "work"))
     events = []
 
@@ -370,6 +487,10 @@ process.exit(1);
     assert "smoke-super-secret" not in caplog.text
     assert "explorer-session-1" not in caplog.text
     assert "turn-0001" not in caplog.text
+    assert (
+        codex_module._codex_auth_failure_fingerprint
+        == codex_module._codex_auth_file_fingerprint()
+    )
 
 
 def test_graph_bootstrap_failure_emits_safe_non_retryable_stale_session_event(
