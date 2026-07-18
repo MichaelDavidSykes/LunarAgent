@@ -48,3 +48,11 @@ test("workspace commands use the isolated broker and cannot claim failed executi
   assert.match(runner, /commandSuccesses/);
   assert.match(runner, /commandFailures/);
 });
+
+test("citations require completed research or exact tool-result URL evidence", () => {
+  assert.match(runner, /nativeWebSearchesCompleted/);
+  assert.match(runner, /collectCitationEvidenceUrls/);
+  assert.match(runner, /citationEvidenceUrls/);
+  assert.match(runner, /sourcesBoundToToolEvidence/);
+  assert.match(runner, /sourcesRemovedWithoutEvidence/);
+});

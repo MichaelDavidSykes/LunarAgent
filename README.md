@@ -38,6 +38,13 @@ Security boundaries:
 - credential-shaped content is removed from command text/output, tool results,
   activity events, final Markdown, entity fields, citations, and follow-ups
   before any of those values can reach the browser;
+- citation links fail closed unless either the exact normalized URL appeared in
+  a completed LunarGraph tool result's explicit source/link field or the
+  official Codex SDK reported a completed native live-web search. The SDK
+  web-search event exposes the query and completion state, but not its result
+  URLs, so activity logs distinguish exact tool-evidence URL binding from
+  URL-safe citations accepted after native search and never claim a stronger
+  page-level binding than the SDK provides;
 - consequential external actions are not enabled.
 
 The response includes Markdown, Explorer actions, grounded clickable entities,

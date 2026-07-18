@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 import { Codex } from "@openai/codex-sdk";
-import { normalizeStructuredResult } from "./output_guardrails.mjs";
+import {
+  collectCitationEvidenceUrls,
+  normalizeStructuredResult,
+} from "./output_guardrails.mjs";
 import { safeToolError, timingFor } from "./runtime_events.mjs";
 import { redactSensitiveTextWithCount } from "./sensitive_text.mjs";
 
@@ -344,6 +347,8 @@ async function main() {
   let turnStartedAt = Date.now();
   let commandFailures = 0;
   let commandSuccesses = 0;
+  let nativeWebSearchesCompleted = 0;
+  const citationEvidenceUrls = new Set();
 
   for await (const sdkEvent of streamed.events) {
     if (sdkEvent.type === "thread.started") {
@@ -389,6 +394,7 @@ async function main() {
         })),
       });
     } else if (item.type === "web_search") {
+      if (stage === "completed") nativeWebSearchesCompleted += 1;
       event(stage === "completed" ? "tool.completed" : stage === "updated" ? "tool.progress" : "tool.started", {
         tool: "web_search",
         label: "Live web research",
@@ -398,6 +404,13 @@ async function main() {
         ...safeToolError(item, "Live web research failed."),
       });
     } else if (item.type === "mcp_tool_call") {
+      if (stage === "completed") {
+        const result =
+          item?.result?.structured_content ?? item?.result?.structuredContent;
+        for (const url of collectCitationEvidenceUrls(result)) {
+          citationEvidenceUrls.add(url);
+        }
+      }
       const commandResult =
         item.tool === "run_workspace_command" && item?.result
           ? item.result.structured_content ?? item.result.structuredContent
@@ -541,7 +554,11 @@ async function main() {
 
   const { result: normalized, metrics: guardrailMetrics } = normalizeStructuredResult(
     finalText,
-    { allowUiActions: Boolean(input.allowUiActions) },
+    {
+      allowUiActions: Boolean(input.allowUiActions),
+      citationEvidenceUrls,
+      nativeWebSearchCompleted: nativeWebSearchesCompleted > 0,
+    },
   );
   if (commandFailures > 0) {
     const commandNotice =
@@ -554,13 +571,20 @@ async function main() {
     tool: "output_guardrails",
     label: "Output safety checks",
     status: "completed",
-    message: "Validated entity interactions and public-source links before presentation.",
+    message: "Validated entity interactions, source-link safety, and available provenance signals before presentation.",
     entitiesAccepted: guardrailMetrics.entitiesAccepted,
     entitiesRemoved:
       guardrailMetrics.entitiesReceived - guardrailMetrics.entitiesAccepted,
     sourcesAccepted: guardrailMetrics.citationsAccepted,
     sourcesRemoved:
       guardrailMetrics.citationsReceived - guardrailMetrics.citationsAccepted,
+    sourcesBoundToToolEvidence:
+      guardrailMetrics.citationsAcceptedFromToolEvidence,
+    sourcesAcceptedAfterNativeWebSearch:
+      guardrailMetrics.citationsAcceptedFromNativeWeb,
+    sourcesRemovedWithoutEvidence:
+      guardrailMetrics.citationsRemovedNoEvidence,
+    nativeWebSearchesCompleted,
     entityActionsReplaced: guardrailMetrics.entityActionsReplaced,
     explorerActionsAccepted: guardrailMetrics.explorerActionsAccepted,
     explorerActionsRemoved:
