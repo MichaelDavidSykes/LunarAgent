@@ -243,7 +243,7 @@ async def run_home_agent_turn(
                             logger.warning("Home Agent event forwarding failed: %s", type(exc).__name__)
                 elif message.get("kind") == "result":
                     result = message
-            return_code = await process.wait()
+            await process.wait()
     except BaseException:
         if process.returncode is None:
             process.terminate()
