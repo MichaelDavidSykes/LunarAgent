@@ -35,6 +35,9 @@ Security boundaries:
 - write AQL is rejected by the backend guardrail;
 - detailed SDK events are streamed back to the backend, with credentials and
   raw chain-of-thought removed;
+- credential-shaped content is removed from command text/output, tool results,
+  activity events, final Markdown, entity fields, citations, and follow-ups
+  before any of those values can reach the browser;
 - consequential external actions are not enabled.
 
 The response includes Markdown, Explorer actions, grounded clickable entities,
@@ -167,9 +170,9 @@ The shared token is used both ways:
 - `LunarSurfaceBackend -> LunarAgent` for the main `/v1/explorer-agent/respond` call
 - `LunarAgent -> LunarSurfaceBackend` for the internal scoped report tools
 
-For Home, the backend also issues a short-lived delegated graph token bound to
-the active Home turn. The MCP process receives only that scoped token, never
-the long-lived backend token.
+For each Explorer turn, the backend issues a short-lived delegated graph token
+bound to the active session, request, and tenant. The MCP process receives only
+that scoped token, never the long-lived backend token.
 
 ## Production Codex authentication
 
@@ -182,4 +185,5 @@ authenticate. Set host
 ownership to container UID `10001`, restrict directory permissions, and treat
 `auth.json` like a password. Never commit or print its contents.
 
-If `EXPLORER_AGENT_BASE_URL` is unset, the backend falls back to its current in-process Explorer agent logic.
+If `EXPLORER_AGENT_BASE_URL` or its shared token is unset, the Explorer Agent
+fails closed with `503`; it never falls back to an API-key-backed model path.

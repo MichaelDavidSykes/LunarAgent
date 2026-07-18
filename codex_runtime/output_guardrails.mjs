@@ -1,3 +1,5 @@
+import { redactSensitiveTextWithCount } from "./sensitive_text.mjs";
+
 const MAX_FINAL_RESPONSE_CHARS = 60000;
 const MAX_ENTITY_ITEMS = 100;
 const MAX_CITATION_ITEMS = 100;
@@ -10,9 +12,12 @@ const ALLOWED_EXPLORER_ACTIONS = new Set([
   "apply_graph_query_scope",
   "save_and_apply_graph_query_scope",
 ]);
+let sensitiveTextRemoved = 0;
 
 function cleanText(value, limit, { singleLine = false } = {}) {
-  let text = String(value ?? "")
+  const redacted = redactSensitiveTextWithCount(value);
+  sensitiveTextRemoved += redacted.count;
+  let text = redacted.text
     .replace(/\u0000/g, "")
     .replace(/[\u0001-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
     .trim();
@@ -193,6 +198,7 @@ function normalizeExplorerAction(candidate) {
 }
 
 export function normalizeStructuredResult(raw, { allowUiActions = false } = {}) {
+  sensitiveTextRemoved = 0;
   let parsed;
   try {
     parsed = JSON.parse(String(raw || ""));
@@ -216,6 +222,7 @@ export function normalizeStructuredResult(raw, { allowUiActions = false } = {}) 
         entityActionsReplaced: 0,
         explorerActionsReceived: 0,
         explorerActionsAccepted: 0,
+        sensitiveTextRemoved,
       },
     };
   }
@@ -269,6 +276,7 @@ export function normalizeStructuredResult(raw, { allowUiActions = false } = {}) 
       entityActionsReplaced: entities.length,
       explorerActionsReceived: rawActions.length,
       explorerActionsAccepted: actions.length,
+      sensitiveTextRemoved,
     },
   };
 }

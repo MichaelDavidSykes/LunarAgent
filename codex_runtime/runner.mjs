@@ -3,8 +3,10 @@
 import { Codex } from "@openai/codex-sdk";
 import { normalizeStructuredResult } from "./output_guardrails.mjs";
 import { safeToolError, timingFor } from "./runtime_events.mjs";
+import { redactSensitiveTextWithCount } from "./sensitive_text.mjs";
 
 const MAX_TEXT = 8000;
+let runtimeSensitiveTextRemoved = 0;
 
 function emit(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -17,7 +19,10 @@ async function readStdin() {
 }
 
 function bounded(value, limit = MAX_TEXT) {
-  return String(value || "").trim().slice(0, limit);
+  const candidate = String(value ?? "").trim().slice(0, limit);
+  const { text, count } = redactSensitiveTextWithCount(candidate);
+  runtimeSensitiveTextRemoved += count;
+  return text.slice(0, limit);
 }
 
 function sensitiveKey(key) {
@@ -472,6 +477,8 @@ async function main() {
     explorerActionsAccepted: guardrailMetrics.explorerActionsAccepted,
     explorerActionsRemoved:
       guardrailMetrics.explorerActionsReceived - guardrailMetrics.explorerActionsAccepted,
+    activitySensitiveTextRemoved: runtimeSensitiveTextRemoved,
+    responseSensitiveTextRemoved: guardrailMetrics.sensitiveTextRemoved,
   });
   emit({
     kind: "result",

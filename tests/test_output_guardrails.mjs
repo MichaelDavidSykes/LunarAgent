@@ -120,6 +120,42 @@ test("unstructured fallback never creates interactive entities or citations", ()
   assert.deepEqual(result.actions, []);
 });
 
+test("structured response text redacts credential-shaped content in every UI surface", () => {
+  const { result, metrics } = normalizeStructuredResult(JSON.stringify({
+    finalResponse: "Authorization: Bearer final-response-secret",
+    entities: [{
+      id: "entity-1",
+      type: "identity",
+      label: "API_KEY=entity-label-secret",
+      subtitle: "github_pat_abcdefghijklmnopqrstuvwxyz123456",
+      sourceIds: [],
+      display: {
+        icon: null,
+        accent: null,
+        summary: "password=entity-summary-secret",
+      },
+      actions: [],
+    }],
+    citations: [{
+      id: "source-1",
+      title: "Public source",
+      url: "https://example.test/story",
+      snippet: "access_token=citation-secret",
+    }],
+    actions: [],
+    followUps: ["Use sk-proj-abcdefghijklmnopqrstuvwxyz"],
+  }));
+
+  const serialized = JSON.stringify(result);
+  assert.doesNotMatch(serialized, /final-response-secret/);
+  assert.doesNotMatch(serialized, /entity-label-secret/);
+  assert.doesNotMatch(serialized, /github_pat_/);
+  assert.doesNotMatch(serialized, /entity-summary-secret/);
+  assert.doesNotMatch(serialized, /citation-secret/);
+  assert.doesNotMatch(serialized, /sk-proj-/);
+  assert.ok(metrics.sensitiveTextRemoved >= 6);
+});
+
 test("Explorer actions are removed unless the backend-authorized turn allows them", () => {
   const raw = JSON.stringify({
     finalResponse: "Response.",
