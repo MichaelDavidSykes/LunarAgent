@@ -109,3 +109,17 @@ test("citations require completed research or exact tool-result URL evidence", (
   assert.match(runner, /sourcesBoundToToolEvidence/);
   assert.match(runner, /sourcesRemovedWithoutEvidence/);
 });
+
+test("interactive entities require exact current-turn curated graph evidence", () => {
+  assert.match(runner, /collectGraphEntityEvidence/);
+  assert.match(
+    runner,
+    /\["search_intelligence_graph", "get_graph_report"\]\.includes\(item\.tool\)/,
+  );
+  assert.match(runner, /graphEntityEvidence: \[\.\.\.graphEntityEvidence\.values\(\)\]/);
+  assert.match(runner, /entitiesRemovedWithoutEvidence/);
+  assert.match(
+    runner,
+    /exact graph document id, label, and type appeared in this turn's completed search_intelligence_graph or get_graph_report result/,
+  );
+});
