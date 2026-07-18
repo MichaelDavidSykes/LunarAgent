@@ -32,6 +32,11 @@ Security boundaries:
 - shell commands have no direct network path; current research uses Codex's
   native live web-search tool and graph access uses the scoped MCP bridge;
 - graph access uses a short-lived, per-turn, read-only delegated token;
+- each MCP process enforces per-turn logical evidence budgets: four curated
+  graph searches, six report reads, two schema inspections, and four custom
+  read queries. Overlapping/synonym-only searches are discouraged, while one
+  bounded retry for HTTP `429`/`502`/`503`/`504` is handled inside the bridge
+  rather than consuming another model-planned lookup;
 - write AQL is rejected by the backend guardrail;
 - detailed SDK events are streamed back to the backend, with credentials and
   raw chain-of-thought removed;
@@ -280,7 +285,9 @@ The shared token is used both ways:
 
 For each Explorer turn, the backend issues a short-lived delegated graph token
 bound to the active session, request, and tenant. The MCP process receives only
-that scoped token, never the long-lived backend token.
+that scoped token, never the long-lived backend token. Logical tool budgets
+bound model-directed repetition independently of the backend's lower-level
+delegated-token HTTP call ceiling.
 
 ## Production Codex authentication
 
