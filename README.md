@@ -40,6 +40,11 @@ Security boundaries:
 - write AQL is rejected by the backend guardrail;
 - detailed SDK events are streamed back to the backend, with credentials and
   raw chain-of-thought removed;
+- when a medium-reasoning SDK stream has no new event for 12 seconds, a
+  bounded liveness-only activity pulse keeps Explorer visibly responsive. It
+  repeats no more than once every 20 seconds, stops after 24 pulses or
+  immediately on completion/cancellation, and reports no inferred work,
+  reasoning text, or hidden chain-of-thought;
 - credential-shaped content is removed from command text/output, tool results,
   activity events, final Markdown, entity fields, citations, and follow-ups
   before any of those values can reach the browser;

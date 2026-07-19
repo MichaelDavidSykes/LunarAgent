@@ -37,6 +37,17 @@ test("runtime activity never forwards model reasoning text", () => {
   assert.doesNotMatch(runner, /summary: bounded\(item\.text/);
 });
 
+test("quiet SDK gaps receive bounded liveness-only activity", () => {
+  assert.match(runner, /createQuietActivityPulse/);
+  assert.match(runner, /streamWithQuietActivity/);
+  assert.match(runner, /tool: "runtime_wait"/);
+  assert.match(runner, /Investigation still active/);
+  assert.match(runner, /Waiting for the next verified research, tool, or synthesis update/);
+  assert.match(runner, /reports stream liveness only/);
+  assert.match(runner, /sdkEvent\.type === "turn\.completed"[\s\S]{0,80}quietActivity\.stop\(\)/);
+  assert.doesNotMatch(runner, /runtime_wait[\s\S]{0,300}item\.text/);
+});
+
 test("runtime activity content is redacted before it is emitted", () => {
   assert.match(runner, /redactSensitiveTextWithCount/);
   assert.match(runner, /activitySensitiveTextRemoved/);

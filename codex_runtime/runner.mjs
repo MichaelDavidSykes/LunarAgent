@@ -8,6 +8,10 @@ import {
   normalizeStructuredResult,
 } from "./output_guardrails.mjs";
 import { processStartTicks } from "./runner_owner.mjs";
+import {
+  createQuietActivityPulse,
+  streamWithQuietActivity,
+} from "./quiet_activity.mjs";
 import { safeToolError, timingFor } from "./runtime_events.mjs";
 import { redactSensitiveTextWithCount } from "./sensitive_text.mjs";
 
@@ -358,8 +362,27 @@ async function main() {
   const citationEvidenceUrls = new Set();
   const graphCitationEvidence = new Map();
   const graphEntityEvidence = new Map();
+  const quietActivity = createQuietActivityPulse({
+    onPulse: ({ pulseNumber, quietForMs, elapsedMs }) => {
+      event("tool.progress", {
+        tool: "runtime_wait",
+        phase: "runtime",
+        label: "Investigation still active",
+        message: "Waiting for the next verified research, tool, or synthesis update.",
+        status: "in_progress",
+        durationMs: elapsedMs,
+        quietForMs,
+        pulseNumber,
+        note: "This bounded status pulse reports stream liveness only; it never contains model reasoning or hidden chain-of-thought.",
+      });
+    },
+  });
 
-  for await (const sdkEvent of streamed.events) {
+  for await (const sdkEvent of streamWithQuietActivity(
+    streamed.events,
+    quietActivity,
+    abortController.signal,
+  )) {
     if (sdkEvent.type === "thread.started") {
       codexThreadId = sdkEvent.thread_id;
       event("tool.progress", {
@@ -379,6 +402,7 @@ async function main() {
       continue;
     }
     if (sdkEvent.type === "turn.completed") {
+      quietActivity.stop();
       event("plan.updated", {
         summary: "Investigation complete.",
         steps: [{ label: "Synthesize grounded answer", status: "completed" }],
