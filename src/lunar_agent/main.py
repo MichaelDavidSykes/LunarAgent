@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import logging
 import secrets
 import time
@@ -20,6 +22,7 @@ from .turn_registry import (
     ExplorerTurnRegistry,
     TurnAlreadyActiveError,
     TurnCancelledError,
+    TurnIdentityConflictError,
 )
 
 app = FastAPI(title=settings.project_name)
@@ -31,6 +34,23 @@ _codex_request_semaphore = asyncio.Semaphore(
 _quota_lock = asyncio.Lock()
 _quota_events: dict[str, list[float]] = {}
 _explorer_turn_registry = ExplorerTurnRegistry()
+
+
+def _explorer_turn_fingerprint(request: ExplorerAgentRespondRequest) -> str:
+    payload = request.model_dump(mode="json", exclude_none=False)
+    # A recovering backend worker may rebuild a fresher graph snapshot while
+    # joining the same immutable user turn. The already-running canonical
+    # Codex execution owns its original evidence snapshot; volatile summary
+    # drift must neither start another execution nor create an identity error.
+    payload.pop("querySummary", None)
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 async def enforce_request_quota(quota_key: str | None, category: str) -> None:
@@ -144,16 +164,25 @@ async def explorer_agent_health() -> dict:
 async def explorer_agent_respond(request: ExplorerAgentRespondRequest) -> ExplorerAgentRespondResponse:
     session_id = str(request.sessionId or "").strip()
     request_id = str(request.requestId or "").strip()
-    task = asyncio.current_task()
-    registered = bool(session_id and request_id and task is not None)
-    try:
-        if registered:
-            await _explorer_turn_registry.register(session_id, request_id, task)
+
+    async def execute() -> ExplorerAgentRespondResponse:
         await enforce_request_quota(request.quotaKey, "explorer")
         async with _codex_request_semaphore:
             return await run_explorer_codex_turn(request)
+
+    try:
+        if session_id and request_id:
+            return await _explorer_turn_registry.run_or_join(
+                session_id,
+                request_id,
+                _explorer_turn_fingerprint(request),
+                execute,
+            )
+        return await execute()
     except TurnCancelledError as exc:
         raise HTTPException(status_code=409, detail="Explorer agent turn was cancelled.") from exc
+    except TurnIdentityConflictError as exc:
+        raise HTTPException(status_code=409, detail="Explorer agent turn identity conflict.") from exc
     except TurnAlreadyActiveError as exc:
         raise HTTPException(status_code=409, detail="Explorer agent turn is already active.") from exc
     except asyncio.CancelledError as exc:
@@ -162,9 +191,6 @@ async def explorer_agent_respond(request: ExplorerAgentRespondRequest) -> Explor
         raise
     except Exception as exc:
         raise_internal_server_error(exc, "Explorer agent response failed.")
-    finally:
-        if registered:
-            await _explorer_turn_registry.unregister(session_id, request_id, task)
 
 
 @app.post(
