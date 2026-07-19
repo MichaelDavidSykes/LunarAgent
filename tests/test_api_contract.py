@@ -9,6 +9,11 @@ from lunar_agent.models import ExplorerAgentCancelRequest, ExplorerAgentRespondR
 from lunar_agent.turn_registry import ExplorerTurnRegistry
 
 
+@pytest.fixture(autouse=True)
+def _fresh_explorer_turn_registry(monkeypatch):
+    monkeypatch.setattr(main_module, "_explorer_turn_registry", ExplorerTurnRegistry())
+
+
 def _authenticated_client(monkeypatch):
     monkeypatch.setattr(main_module.settings, "shared_token", "unit-test-shared-token")
     client = TestClient(main_module.app)
@@ -216,6 +221,58 @@ def test_explorer_agent_endpoint_uses_codex_runtime(monkeypatch):
     assert response.status_code == 200
     assert response.json()["reply"] == "Investigated"
     assert response.json()["model"] == "gpt-5.6-sol"
+
+
+def test_explorer_agent_endpoint_replays_one_exact_runtime_result(monkeypatch):
+    calls = 0
+
+    async def fake_codex_turn(_request):
+        nonlocal calls
+        calls += 1
+        return {
+            "reply": "One exact result",
+            "model": "gpt-5.6-sol",
+            "actions": [],
+            "followUps": [],
+            "entities": [],
+            "citations": [],
+        }
+
+    monkeypatch.setattr(main_module, "run_explorer_codex_turn", fake_codex_turn)
+    client = _authenticated_client(monkeypatch)
+    payload = {
+        "sessionId": "explorer-session-replay",
+        "requestId": "turn-replay",
+        "clientId": "client-1",
+        "queryPreview": "Current Explorer scope",
+        "queryContext": {},
+        "querySummary": {},
+        "currentUserMessage": "Investigate Acme",
+        "selectedEntities": [],
+        "conversationHistory": [],
+    }
+
+    first = client.post("/v1/explorer-agent/respond", json=payload)
+    replay = client.post("/v1/explorer-agent/respond", json=payload)
+    refreshed_snapshot_replay = client.post(
+        "/v1/explorer-agent/respond",
+        json={**payload, "querySummary": {"reportCount": 99}},
+    )
+    conflict = client.post(
+        "/v1/explorer-agent/respond",
+        json={**payload, "currentUserMessage": "Different input"},
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json() == first.json()
+    assert refreshed_snapshot_replay.status_code == 200
+    assert refreshed_snapshot_replay.json() == first.json()
+    assert conflict.status_code == 409
+    assert conflict.json() == {
+        "detail": "Explorer agent turn identity conflict.",
+    }
+    assert calls == 1
 
 
 def test_explorer_agent_endpoint_hides_codex_failure_detail(monkeypatch):
