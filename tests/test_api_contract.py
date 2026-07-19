@@ -258,6 +258,10 @@ def test_explorer_agent_endpoint_replays_one_exact_runtime_result(monkeypatch):
         "/v1/explorer-agent/respond",
         json={**payload, "querySummary": {"reportCount": 99}},
     )
+    checkpointed_thread_replay = client.post(
+        "/v1/explorer-agent/respond",
+        json={**payload, "codexThreadId": "codex-durable-1"},
+    )
     conflict = client.post(
         "/v1/explorer-agent/respond",
         json={**payload, "currentUserMessage": "Different input"},
@@ -268,6 +272,8 @@ def test_explorer_agent_endpoint_replays_one_exact_runtime_result(monkeypatch):
     assert replay.json() == first.json()
     assert refreshed_snapshot_replay.status_code == 200
     assert refreshed_snapshot_replay.json() == first.json()
+    assert checkpointed_thread_replay.status_code == 200
+    assert checkpointed_thread_replay.json() == first.json()
     assert conflict.status_code == 409
     assert conflict.json() == {
         "detail": "Explorer agent turn identity conflict.",

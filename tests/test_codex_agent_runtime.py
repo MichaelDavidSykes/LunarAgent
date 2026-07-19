@@ -262,6 +262,11 @@ const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 process.stdout.write(JSON.stringify({
+  kind: "checkpoint",
+  checkpointType: "codex_thread",
+  codexThreadId: "codex-1"
+}) + "\\n");
+process.stdout.write(JSON.stringify({
   kind: "event",
   eventType: "tool.progress",
   data: {
@@ -298,6 +303,7 @@ process.stdout.write(JSON.stringify({
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
     monkeypatch.setenv("LUNAR_AGENT_BACKEND_SHARED_TOKEN", "must-not-leak")
     events = []
+    checkpoints = []
 
     async def bootstrap(_request):
         return {
@@ -308,17 +314,23 @@ process.stdout.write(JSON.stringify({
     async def sink(event_type, data):
         events.append((event_type, data))
 
+    async def checkpoint(codex_thread_id):
+        checkpoints.append(codex_thread_id)
+        return True
+
     response = asyncio.run(
         codex_module.run_explorer_codex_turn(
             _request(),
             graph_bootstrap=bootstrap,
             event_sink=sink,
+            checkpoint_sink=checkpoint,
         )
     )
 
     assert response.reply == "Grounded result"
     assert response.codexThreadId == "codex-1"
     assert response.entities[0]["label"] == "Acme"
+    assert checkpoints == ["codex-1"]
     assert events == [
         (
             "tool.progress",
@@ -333,6 +345,114 @@ process.stdout.write(JSON.stringify({
     ]
     marker = next((tmp_path / "work").glob("*/README.md"))
     assert "isolated workspace" in marker.read_text(encoding="utf-8")
+
+
+def test_runtime_recovers_the_backend_checkpointed_codex_thread(
+    tmp_path,
+    monkeypatch,
+):
+    runner = tmp_path / "checkpoint-runner.mjs"
+    runner.write_text(
+        """
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+if (payload.codexThreadId !== "codex-durable-1") process.exit(7);
+process.stdout.write(JSON.stringify({
+  kind: "checkpoint",
+  checkpointType: "codex_thread",
+  codexThreadId: payload.codexThreadId
+}) + "\\n");
+process.stdout.write(JSON.stringify({
+  kind: "result",
+  codexThreadId: payload.codexThreadId,
+  model: payload.model,
+  finalResponse: "Recovered grounded result",
+  actions: [],
+  followUps: [],
+  entities: [],
+  citations: []
+}) + "\\n");
+""".strip(),
+        encoding="utf-8",
+    )
+    mcp = tmp_path / "fake-mcp.mjs"
+    mcp.write_text("// exists", encoding="utf-8")
+    monkeypatch.setattr(codex_module, "_runner_path", lambda: runner)
+    monkeypatch.setattr(codex_module, "_mcp_server_path", lambda: mcp)
+    monkeypatch.setattr(
+        codex_module.settings,
+        "codex_agent_workspace_root",
+        str(tmp_path / "work"),
+    )
+    checkpoints = []
+
+    async def bootstrap(_request):
+        return {
+            "token": "delegated-read-only-token",
+            "toolsUrl": (
+                "https://backend.example.test/"
+                "api/v1/graph/ai-agent/codex-tools"
+            ),
+            "codexThreadId": "codex-durable-1",
+        }
+
+    async def checkpoint(codex_thread_id):
+        checkpoints.append(codex_thread_id)
+        return True
+
+    async def sink(_event_type, _data):
+        return None
+
+    response = asyncio.run(codex_module.run_explorer_codex_turn(
+        _request(),
+        graph_bootstrap=bootstrap,
+        event_sink=sink,
+        checkpoint_sink=checkpoint,
+    ))
+
+    assert response.reply == "Recovered grounded result"
+    assert response.codexThreadId == "codex-durable-1"
+    assert checkpoints == ["codex-durable-1"]
+
+
+def test_runtime_rejects_conflicting_backend_thread_checkpoint(
+    tmp_path,
+    monkeypatch,
+):
+    runner = tmp_path / "runner.mjs"
+    runner.write_text("// must not run", encoding="utf-8")
+    mcp = tmp_path / "mcp.mjs"
+    mcp.write_text("// exists", encoding="utf-8")
+    request = _request().model_copy(
+        update={"codexThreadId": "codex-request-thread"}
+    )
+    monkeypatch.setattr(codex_module, "_runner_path", lambda: runner)
+    monkeypatch.setattr(codex_module, "_mcp_server_path", lambda: mcp)
+    events = []
+
+    async def bootstrap(_request):
+        return {
+            "token": "delegated-read-only-token",
+            "toolsUrl": (
+                "https://backend.example.test/"
+                "api/v1/graph/ai-agent/codex-tools"
+            ),
+            "codexThreadId": "codex-other-thread",
+        }
+
+    async def sink(event_type, data):
+        events.append((event_type, data))
+
+    with pytest.raises(codex_module.ExplorerCodexRuntimeError) as exc_info:
+        asyncio.run(codex_module.run_explorer_codex_turn(
+            request,
+            graph_bootstrap=bootstrap,
+            event_sink=sink,
+        ))
+
+    assert exc_info.value.code == "graph_session_stale"
+    assert events[-1][1]["errorCode"] == "graph_session_stale"
 
 
 def test_runtime_rejects_incomplete_graph_bootstrap(tmp_path, monkeypatch):

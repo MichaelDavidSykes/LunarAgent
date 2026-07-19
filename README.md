@@ -40,6 +40,13 @@ Security boundaries:
 - write AQL is rejected by the backend guardrail;
 - detailed SDK events are streamed back to the backend, with credentials and
   raw chain-of-thought removed;
+- as soon as the official SDK establishes a thread, LunarAgent checkpoints its
+  opaque thread id into the exact active backend turn. Because Codex session
+  storage is on the protected persistent `CODEX_HOME` mount, a replacement
+  LunarAgent process can retrieve that checkpoint during graph bootstrap and
+  resume the same SDK thread after a service restart. The checkpoint is
+  internal-only, tenant/access checked, compare-and-set, and never appears in
+  browser activity logs;
 - when a medium-reasoning SDK stream has no new event for 12 seconds, a
   bounded liveness-only activity pulse keeps Explorer visibly responsive. It
   repeats no more than once every 20 seconds, stops after 24 pulses or
