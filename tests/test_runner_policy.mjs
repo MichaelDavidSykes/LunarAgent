@@ -37,6 +37,21 @@ test("runtime activity never forwards model reasoning text", () => {
   assert.doesNotMatch(runner, /summary: bounded\(item\.text/);
 });
 
+test("runtime checkpoints the official Codex thread before display activity", () => {
+  const checkpoint = runner.indexOf('kind: "checkpoint"');
+  const activity = runner.indexOf(
+    'message: "Secure Codex investigation thread established."',
+  );
+
+  assert.ok(checkpoint >= 0);
+  assert.ok(activity > checkpoint);
+  assert.match(runner, /checkpointType: "codex_thread"/);
+  assert.doesNotMatch(
+    runner.slice(activity, activity + 220),
+    /codexThreadId|thread_id/,
+  );
+});
+
 test("quiet SDK gaps receive bounded liveness-only activity", () => {
   assert.match(runner, /createQuietActivityPulse/);
   assert.match(runner, /streamWithQuietActivity/);

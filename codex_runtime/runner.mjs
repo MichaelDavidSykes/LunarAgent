@@ -385,6 +385,11 @@ async function main() {
   )) {
     if (sdkEvent.type === "thread.started") {
       codexThreadId = sdkEvent.thread_id;
+      emit({
+        kind: "checkpoint",
+        checkpointType: "codex_thread",
+        codexThreadId,
+      });
       event("tool.progress", {
         phase: "runtime",
         message: "Secure Codex investigation thread established.",

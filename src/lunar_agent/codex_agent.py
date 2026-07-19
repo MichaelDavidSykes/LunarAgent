@@ -405,6 +405,22 @@ async def _bootstrap_graph_tools(request: ExplorerAgentRespondRequest) -> dict[s
     )
 
 
+async def _forward_runtime_checkpoint(
+    request: ExplorerAgentRespondRequest,
+    codex_thread_id: str,
+) -> bool:
+    response = await _post_backend(
+        "/api/v1/graph/ai-agent/tools/runtime-checkpoint",
+        {
+            "session_id": request.sessionId,
+            "request_id": request.requestId,
+            "codex_thread_id": codex_thread_id,
+        },
+        timeout_seconds=min(max(float(settings.backend_http_timeout), 10.0), 90.0),
+    )
+    return response.get("accepted") is True
+
+
 async def _forward_event(
     request: ExplorerAgentRespondRequest,
     event_type: str,
@@ -444,6 +460,7 @@ async def run_explorer_codex_turn(
     *,
     event_sink: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     graph_bootstrap: Callable[[ExplorerAgentRespondRequest], Awaitable[dict[str, Any]]] | None = None,
+    checkpoint_sink: Callable[[str], Awaitable[bool]] | None = None,
 ) -> ExplorerAgentRespondResponse:
     started_at = time.monotonic()
     session_fingerprint = _request_fingerprint(request.sessionId)
@@ -507,11 +524,35 @@ async def run_explorer_codex_turn(
         )
         raise ExplorerCodexRuntimeError(code)
 
+    requested_codex_thread_id = str(request.codexThreadId or "").strip()
+    checkpointed_codex_thread_id = str(
+        bootstrap.get("codexThreadId") or ""
+    ).strip()
+    if (
+        requested_codex_thread_id
+        and checkpointed_codex_thread_id
+        and requested_codex_thread_id != checkpointed_codex_thread_id
+    ):
+        code = "graph_session_stale"
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        await _emit_runtime_failure(sink, code=code, duration_ms=duration_ms)
+        raise ExplorerCodexRuntimeError(code)
+    effective_codex_thread_id = (
+        requested_codex_thread_id
+        or checkpointed_codex_thread_id
+        or None
+    )
+    checkpoint = checkpoint_sink or (
+        lambda codex_thread_id: _forward_runtime_checkpoint(
+            request,
+            codex_thread_id,
+        )
+    )
     workspace = _workspace_for_thread(request.sessionId)
     payload = {
         "threadId": request.sessionId,
         "turnId": request.requestId,
-        "codexThreadId": request.codexThreadId,
+        "codexThreadId": effective_codex_thread_id,
         "clientId": request.clientId or request.quotaKey or request.sessionId,
         "currentUserMessage": request.currentUserMessage,
         "selectedEntities": [item.model_dump() for item in request.selectedEntities],
@@ -584,7 +625,34 @@ async def run_explorer_codex_turn(
                     continue
                 if not isinstance(message, dict):
                     continue
-                if message.get("kind") == "event":
+                if (
+                    message.get("kind") == "checkpoint"
+                    and message.get("checkpointType") == "codex_thread"
+                ):
+                    codex_thread_id = str(
+                        message.get("codexThreadId") or ""
+                    ).strip()
+                    if not codex_thread_id or len(codex_thread_id) > 180:
+                        raise RuntimeError(
+                            "Codex runtime emitted an invalid thread checkpoint"
+                        )
+                    try:
+                        checkpoint_accepted = await checkpoint(codex_thread_id)
+                    except Exception as exc:
+                        # A transient checkpoint transport failure must not
+                        # discard an otherwise healthy, read-only Codex turn.
+                        # The final response still carries the thread id and
+                        # the backend persists it on ordinary completion.
+                        logger.warning(
+                            "LunarAgent runtime checkpoint forwarding failed: %s",
+                            type(exc).__name__,
+                        )
+                    else:
+                        if not checkpoint_accepted:
+                            raise RuntimeError(
+                                "Explorer turn rejected its Codex runtime checkpoint"
+                            )
+                elif message.get("kind") == "event":
                     event_type = str(message.get("eventType") or "").strip()
                     data = message.get("data")
                     if event_type in _EVENT_TYPES and isinstance(data, dict):
