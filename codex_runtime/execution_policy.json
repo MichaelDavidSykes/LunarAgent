@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "mode": "read-only-no-host-exec",
+  "sandboxMode": "read-only",
+  "networkAccessEnabled": false,
+  "hostCommands": false,
+  "fileWrites": false
+}

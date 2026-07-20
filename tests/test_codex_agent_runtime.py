@@ -18,19 +18,9 @@ from lunar_agent.models import (
 
 
 @pytest.fixture(autouse=True)
-def configured_command_broker(monkeypatch):
+def reset_codex_auth_probe(monkeypatch):
     monkeypatch.setattr(codex_module, "_codex_auth_failure_fingerprint", None)
     monkeypatch.setattr(codex_module, "_codex_auth_probe_cache", None)
-    monkeypatch.setattr(
-        codex_module.settings,
-        "command_broker_socket",
-        "/run/lunar-agent-command-broker/broker.sock",
-    )
-    monkeypatch.setattr(
-        codex_module.settings,
-        "command_broker_token",
-        "broker-test-token",
-    )
 
 
 def test_codex_auth_status_probes_exact_chatgpt_login_method(
@@ -182,66 +172,31 @@ def test_explorer_agent_request_rejects_oversized_message():
         )
 
 
-@pytest.mark.parametrize(
-    ("payload", "accepted"),
-    [
-        ({"status": "ok", "sandbox": "bubblewrap"}, False),
-        (
-            {
-                "status": "ok",
-                "sandbox": "bubblewrap",
-                "verification": "executable",
-            },
-            True,
-        ),
-    ],
-)
-def test_command_broker_status_requires_executable_probe(
-    payload,
-    accepted,
-    monkeypatch,
-):
-    class Response:
-        def raise_for_status(self):
-            return None
+def test_execution_policy_status_proves_no_host_execution():
+    assert codex_module.execution_policy_status() == {
+        "configured": True,
+        "mode": "read-only-no-host-exec",
+        "verified": True,
+        "sandboxMode": "read-only",
+        "networkAccessEnabled": False,
+        "hostCommands": False,
+        "fileWrites": False,
+    }
 
-        def json(self):
-            return payload
 
-    class Client:
-        def __init__(self, **_kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        async def get(self, url, headers):
-            assert url == "http://command-broker/live"
-            assert headers == {"Authorization": "Bearer broker-test-token"}
-            return Response()
-
-    monkeypatch.setattr(codex_module.Path, "is_socket", lambda _path: True)
-    monkeypatch.setattr(
-        codex_module.httpx,
-        "AsyncHTTPTransport",
-        lambda **_kwargs: object(),
+def test_execution_policy_status_rejects_policy_drift(tmp_path, monkeypatch):
+    runtime = tmp_path / "codex_runtime"
+    runtime.mkdir()
+    (runtime / "execution_policy.json").write_text(
+        '{"schema":1,"mode":"workspace-write"}',
+        encoding="utf-8",
     )
-    monkeypatch.setattr(codex_module.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(codex_module, "_project_root", lambda: tmp_path)
 
-    if accepted:
-        result = asyncio.run(codex_module.command_broker_status())
-        assert result == {
-            "configured": True,
-            "mode": "isolated-workspace",
-            "verified": True,
-        }
-    else:
-        with pytest.raises(codex_module.ExplorerCodexRuntimeError) as exc_info:
-            asyncio.run(codex_module.command_broker_status())
-        assert exc_info.value.code == "command_sandbox_unavailable"
+    with pytest.raises(codex_module.ExplorerCodexRuntimeError) as exc_info:
+        codex_module.execution_policy_status()
+
+    assert exc_info.value.code == "runtime_unavailable"
 
 
 def test_project_root_uses_deployed_application_root(tmp_path, monkeypatch):
@@ -276,11 +231,8 @@ process.stdout.write(JSON.stringify({
     message: "working",
     leakedOpenAi: Boolean(process.env.OPENAI_API_KEY),
     leakedBackend: Boolean(process.env.LUNAR_AGENT_BACKEND_SHARED_TOKEN),
-    leakedCommandBroker: Boolean(process.env.LUNAR_AGENT_COMMAND_BROKER_TOKEN),
-    commandBrokerConfigured: Boolean(
-      payload.commandBrokerSocket &&
-      payload.commandBrokerToken &&
-      payload.commandWorkspaceId
+    hasCommandBrokerPayload: Object.keys(payload).some((key) =>
+      key.startsWith("commandBroker") || key === "commandWorkspaceId"
     )
   }
 }) + "\\n");
@@ -350,13 +302,12 @@ process.stdout.write(JSON.stringify({
                 "message": "working",
                 "leakedOpenAi": False,
                 "leakedBackend": False,
-                "leakedCommandBroker": False,
-                "commandBrokerConfigured": True,
+                "hasCommandBrokerPayload": False,
             },
         )
     ]
     marker = next((tmp_path / "work").glob("*/README.md"))
-    assert "isolated workspace" in marker.read_text(encoding="utf-8")
+    assert "read-only to the model" in marker.read_text(encoding="utf-8")
 
 
 def test_runtime_recovers_the_backend_checkpointed_codex_thread(
@@ -726,7 +677,7 @@ def test_runtime_rejects_incomplete_graph_bootstrap(tmp_path, monkeypatch):
     assert events[0][1]["errorCode"] == "graph_bridge_unavailable"
 
 
-def test_runtime_fails_closed_when_command_broker_is_unconfigured(
+def test_runtime_fails_closed_when_execution_policy_is_missing(
     tmp_path,
     monkeypatch,
 ):
@@ -736,7 +687,7 @@ def test_runtime_fails_closed_when_command_broker_is_unconfigured(
     mcp.write_text("", encoding="utf-8")
     monkeypatch.setattr(codex_module, "_runner_path", lambda: runner)
     monkeypatch.setattr(codex_module, "_mcp_server_path", lambda: mcp)
-    monkeypatch.setattr(codex_module.settings, "command_broker_token", "")
+    monkeypatch.setattr(codex_module, "_project_root", lambda: tmp_path)
     events = []
 
     async def sink(event_type, data):
@@ -751,18 +702,15 @@ def test_runtime_fails_closed_when_command_broker_is_unconfigured(
             )
         )
 
-    assert exc_info.value.code == "command_sandbox_unavailable"
+    assert exc_info.value.code == "runtime_unavailable"
     assert events == [
         (
             "tool.progress",
             {
                 "phase": "runtime",
                 "status": "failed",
-                "errorCode": "command_sandbox_unavailable",
-                "message": (
-                    "The isolated workspace command service is temporarily unavailable. "
-                    "Retry this investigation."
-                ),
+                "errorCode": "runtime_unavailable",
+                "message": "The Codex investigation runtime is temporarily unavailable. Retry this turn.",
                 "durationMs": 0,
                 "retryable": True,
             },

@@ -36,7 +36,6 @@ _RETRYABLE_FAILURE_CODES = {
     "codex_usage_limited",
     "graph_bridge_unavailable",
     "graph_tool_rate_limited",
-    "command_sandbox_unavailable",
     "runtime_timeout",
     "runtime_unavailable",
 }
@@ -59,8 +58,8 @@ _SAFE_FAILURE_MESSAGES = {
     "graph_tool_rate_limited": (
         "The LunarGraph tool bridge is temporarily rate limited. Retry this investigation shortly."
     ),
-    "command_sandbox_unavailable": (
-        "The isolated workspace command service is temporarily unavailable. Retry this investigation."
+    "runtime_policy_violation": (
+        "The investigation attempted an unavailable local execution capability and was stopped."
     ),
     "runtime_timeout": (
         "The investigation exceeded its secure runtime limit. Narrow the request and retry."
@@ -124,8 +123,8 @@ def _runtime_failure_code(exc: BaseException, stderr: str = "") -> str:
         return "codex_usage_limited"
     if any(marker in text for marker in ("timed out", "timeout", "timeouterror")):
         return "runtime_timeout"
-    if any(marker in text for marker in ("command broker", "command sandbox")):
-        return "command_sandbox_unavailable"
+    if "explorer runtime policy blocked local" in text:
+        return "runtime_policy_violation"
     if any(
         marker in text
         for marker in (
@@ -224,32 +223,29 @@ async def _cached_codex_login_method(
     return method
 
 
-async def command_broker_status() -> dict[str, Any]:
-    socket_path = str(settings.command_broker_socket or "").strip()
-    token = str(settings.command_broker_token or "").strip()
-    if not socket_path or not token or not Path(socket_path).is_socket():
-        raise ExplorerCodexRuntimeError("command_sandbox_unavailable")
+def execution_policy_status() -> dict[str, Any]:
+    policy_path = _project_root() / "codex_runtime" / "execution_policy.json"
     try:
-        transport = httpx.AsyncHTTPTransport(uds=socket_path)
-        async with httpx.AsyncClient(transport=transport, timeout=3.0) as client:
-            response = await client.get(
-                "http://command-broker/live",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            response.raise_for_status()
-            payload = response.json()
-    except Exception as exc:
-        raise ExplorerCodexRuntimeError("command_sandbox_unavailable") from exc
-    if (
-        not isinstance(payload, dict)
-        or payload.get("status") != "ok"
-        or payload.get("verification") != "executable"
-    ):
-        raise ExplorerCodexRuntimeError("command_sandbox_unavailable")
+        payload = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ExplorerCodexRuntimeError("runtime_unavailable") from exc
+    if payload != {
+        "schema": 1,
+        "mode": "read-only-no-host-exec",
+        "sandboxMode": "read-only",
+        "networkAccessEnabled": False,
+        "hostCommands": False,
+        "fileWrites": False,
+    }:
+        raise ExplorerCodexRuntimeError("runtime_unavailable")
     return {
         "configured": True,
-        "mode": "isolated-workspace",
+        "mode": payload["mode"],
         "verified": True,
+        "sandboxMode": payload["sandboxMode"],
+        "networkAccessEnabled": payload["networkAccessEnabled"],
+        "hostCommands": payload["hostCommands"],
+        "fileWrites": payload["fileWrites"],
     }
 
 
@@ -350,9 +346,9 @@ def _workspace_for_thread(thread_id: str) -> Path:
     marker = workspace / "README.md"
     if not marker.exists():
         marker.write_text(
-            "# LunarChain Explorer Agent investigation workspace\n\n"
-            "This isolated workspace is available for temporary analysis files and commands. "
-            "Do not place credentials or persistent customer exports here.\n",
+            "# LunarChain Explorer Agent private runtime directory\n\n"
+            "This directory is read-only to the model. Local commands and "
+            "user-directed file changes are unavailable.\n",
             encoding="utf-8",
         )
     return workspace
@@ -574,12 +570,11 @@ async def run_explorer_codex_turn(
         raise RuntimeError("LunarAgent Codex runtime is disabled")
     if not str(request.sessionId or "").strip() or not str(request.requestId or "").strip():
         raise RuntimeError("Explorer session and request identifiers are required")
-    command_broker_socket = str(settings.command_broker_socket or "").strip()
-    command_broker_token = str(settings.command_broker_token or "").strip()
-    if not command_broker_socket or not command_broker_token:
-        code = "command_sandbox_unavailable"
-        await _emit_runtime_failure(sink, code=code, duration_ms=0)
-        raise ExplorerCodexRuntimeError(code)
+    try:
+        execution_policy_status()
+    except ExplorerCodexRuntimeError as exc:
+        await _emit_runtime_failure(sink, code=exc.code, duration_ms=0)
+        raise
     runner_path = _runner_path()
     mcp_path = _mcp_server_path()
     if not runner_path.is_file() or not mcp_path.is_file():
@@ -695,9 +690,6 @@ async def run_explorer_codex_turn(
         "mcpServerPath": str(mcp_path),
         "graphToolsUrl": graph_tools_url,
         "graphDelegatedToken": delegated_token,
-        "commandBrokerSocket": command_broker_socket,
-        "commandBrokerToken": command_broker_token,
-        "commandWorkspaceId": workspace.name,
     }
 
     try:

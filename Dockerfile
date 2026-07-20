@@ -25,8 +25,8 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && python -m pip install --no-cache-dir .
 
 RUN useradd --system --uid 10001 --create-home --home-dir /home/lunaragent lunaragent \
-    && mkdir -p /tmp/lunar-home-workspaces /codex-auth \
-    && chown -R lunaragent:lunaragent /tmp/lunar-home-workspaces /codex-auth /home/lunaragent
+    && mkdir -p /tmp/lunar-agent-codex-workspaces /codex-auth \
+    && chown -R lunaragent:lunaragent /tmp/lunar-agent-codex-workspaces /codex-auth /home/lunaragent
 
 USER 10001:10001
 

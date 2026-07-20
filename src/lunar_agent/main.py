@@ -16,7 +16,7 @@ from .models import (
     SafeRouteAreaRiskResearchRequest,
     SafeRouteAreaRiskResearchResponse,
 )
-from .codex_agent import command_broker_status, codex_auth_status, run_explorer_codex_turn
+from .codex_agent import codex_auth_status, execution_policy_status, run_explorer_codex_turn
 from .service import research_safe_route_area_risk
 from .turn_registry import (
     ExplorerTurnRegistry,
@@ -146,11 +146,11 @@ async def explorer_agent_health() -> dict:
     ).strip():
         raise HTTPException(status_code=503, detail="LunarAgent backend bridge is unavailable")
     try:
-        command_sandbox = await command_broker_status()
+        execution_policy = execution_policy_status()
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail="LunarAgent command sandbox is unavailable",
+            detail="LunarAgent read-only execution policy is unavailable",
         ) from exc
     return {
         "status": "ok",
@@ -159,7 +159,9 @@ async def explorer_agent_health() -> dict:
         "reasoningEffort": settings.codex_agent_reasoning_effort,
         "auth": auth,
         "billingMode": "chatgpt-plan",
-        "commandSandbox": command_sandbox,
+        # Preserve the response field for backend compatibility while the mode
+        # explicitly proves that host commands and file writes are unavailable.
+        "commandSandbox": execution_policy,
     }
 
 
