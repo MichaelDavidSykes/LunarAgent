@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import signal
 import shutil
 import time
@@ -421,6 +422,97 @@ async def _forward_runtime_checkpoint(
     return response.get("accepted") is True
 
 
+def _runtime_result_fingerprint(response: ExplorerAgentRespondResponse) -> str:
+    canonical = json.dumps(
+        response.model_dump(mode="json", exclude_none=False),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _checkpointed_runtime_response(
+    bootstrap: dict[str, Any],
+    request: ExplorerAgentRespondRequest,
+    codex_thread_id: str | None,
+) -> ExplorerAgentRespondResponse | None:
+    checkpoint = bootstrap.get("resultCheckpoint")
+    if checkpoint is None:
+        return None
+    if not isinstance(checkpoint, dict):
+        raise ExplorerCodexRuntimeError("graph_session_stale")
+    if str(checkpoint.get("requestId") or "").strip() != str(
+        request.requestId or ""
+    ).strip():
+        raise ExplorerCodexRuntimeError("graph_session_stale")
+    checkpoint_thread_id = str(checkpoint.get("codexThreadId") or "").strip()
+    if (
+        not checkpoint_thread_id
+        or not codex_thread_id
+        or checkpoint_thread_id != codex_thread_id
+    ):
+        raise ExplorerCodexRuntimeError("graph_session_stale")
+    response_payload = checkpoint.get("response")
+    if not isinstance(response_payload, dict):
+        raise ExplorerCodexRuntimeError("graph_session_stale")
+    try:
+        response = ExplorerAgentRespondResponse.model_validate(response_payload)
+        fingerprint = _runtime_result_fingerprint(response)
+    except Exception as exc:
+        raise ExplorerCodexRuntimeError("graph_session_stale") from exc
+    expected_fingerprint = str(
+        checkpoint.get("resultFingerprint") or ""
+    ).strip()
+    if (
+        len(expected_fingerprint) != 64
+        or not secrets.compare_digest(fingerprint, expected_fingerprint)
+        or str(response.codexThreadId or "").strip() != checkpoint_thread_id
+    ):
+        raise ExplorerCodexRuntimeError("graph_session_stale")
+    return response
+
+
+async def _forward_runtime_result_checkpoint(
+    request: ExplorerAgentRespondRequest,
+    response: ExplorerAgentRespondResponse,
+) -> bool:
+    payload = {
+        "session_id": request.sessionId,
+        "request_id": request.requestId,
+        "codex_thread_id": response.codexThreadId,
+        "result": response.model_dump(mode="json", exclude_none=False),
+    }
+    delays = (0.0, 0.25, 1.0)
+    last_error: Exception | None = None
+    for attempt, delay in enumerate(delays):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            checkpoint_response = await _post_backend(
+                "/api/v1/graph/ai-agent/tools/runtime-result-checkpoint",
+                payload,
+                timeout_seconds=min(
+                    max(float(settings.backend_http_timeout), 10.0),
+                    90.0,
+                ),
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_error = exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code < 500:
+                raise
+            last_error = exc
+        else:
+            return checkpoint_response.get("accepted") is True
+        if attempt + 1 == len(delays):
+            break
+    if last_error is not None:
+        raise last_error
+    return False
+
+
 async def _forward_event(
     request: ExplorerAgentRespondRequest,
     event_type: str,
@@ -461,6 +553,11 @@ async def run_explorer_codex_turn(
     event_sink: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     graph_bootstrap: Callable[[ExplorerAgentRespondRequest], Awaitable[dict[str, Any]]] | None = None,
     checkpoint_sink: Callable[[str], Awaitable[bool]] | None = None,
+    result_checkpoint_sink: Callable[
+        [ExplorerAgentRespondResponse],
+        Awaitable[bool],
+    ]
+    | None = None,
 ) -> ExplorerAgentRespondResponse:
     started_at = time.monotonic()
     session_fingerprint = _request_fingerprint(request.sessionId)
@@ -542,6 +639,34 @@ async def run_explorer_codex_turn(
         or checkpointed_codex_thread_id
         or None
     )
+    try:
+        checkpointed_response = _checkpointed_runtime_response(
+            bootstrap,
+            request,
+            effective_codex_thread_id,
+        )
+    except ExplorerCodexRuntimeError as exc:
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        await _emit_runtime_failure(
+            sink,
+            code=exc.code,
+            duration_ms=duration_ms,
+        )
+        raise
+    if checkpointed_response is not None:
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        telemetry_logger.info(
+            (
+                "Explorer Codex durable result replayed session=%s request=%s "
+                "model=%s duration_ms=%s"
+            ),
+            session_fingerprint,
+            request_fingerprint,
+            checkpointed_response.model or settings.codex_agent_model,
+            duration_ms,
+        )
+        _clear_codex_auth_failure()
+        return checkpointed_response
     checkpoint = checkpoint_sink or (
         lambda codex_thread_id: _forward_runtime_checkpoint(
             request,
@@ -698,6 +823,40 @@ async def run_explorer_codex_turn(
         )
         raise ExplorerCodexRuntimeError(code) from runtime_exc
 
+    response = ExplorerAgentRespondResponse(
+        reply=str(result.get("finalResponse") or "").strip()[:60000],
+        codexThreadId=str(result.get("codexThreadId") or "").strip() or None,
+        model=str(result.get("model") or settings.codex_agent_model).strip() or None,
+        actions=list(result.get("actions") or [])[:4],
+        followUps=list(result.get("followUps") or [])[:4],
+        entities=list(result.get("entities") or [])[:100],
+        citations=list(result.get("citations") or [])[:100],
+    )
+    if not response.codexThreadId:
+        raise ExplorerCodexRuntimeError("graph_session_stale")
+    result_checkpoint = result_checkpoint_sink or (
+        lambda final_response: _forward_runtime_result_checkpoint(
+            request,
+            final_response,
+        )
+    )
+    try:
+        result_checkpoint_accepted = await result_checkpoint(response)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        # Preserve a successfully completed read-only investigation if the
+        # private checkpoint transport is briefly unavailable. The ordinary
+        # response can still complete, and an in-process exact retry joins the
+        # retained canonical result. No consequential action is executed here.
+        logger.warning(
+            "LunarAgent final-result checkpoint forwarding failed: %s",
+            type(exc).__name__,
+        )
+    else:
+        if not result_checkpoint_accepted:
+            raise ExplorerCodexRuntimeError("graph_session_stale")
+
     duration_ms = int((time.monotonic() - started_at) * 1000)
     telemetry_logger.info(
         (
@@ -714,15 +873,7 @@ async def run_explorer_codex_turn(
     )
     _clear_codex_auth_failure()
 
-    return ExplorerAgentRespondResponse(
-        reply=str(result.get("finalResponse") or "").strip()[:60000],
-        codexThreadId=str(result.get("codexThreadId") or "").strip() or None,
-        model=str(result.get("model") or settings.codex_agent_model).strip() or None,
-        actions=list(result.get("actions") or [])[:4],
-        followUps=list(result.get("followUps") or [])[:4],
-        entities=list(result.get("entities") or [])[:100],
-        citations=list(result.get("citations") or [])[:100],
-    )
+    return response
 
 
 async def codex_auth_status() -> dict[str, Any]:

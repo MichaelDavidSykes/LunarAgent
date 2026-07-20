@@ -41,9 +41,9 @@ def _explorer_turn_fingerprint(request: ExplorerAgentRespondRequest) -> str:
     # A recovering backend worker may rebuild a fresher graph snapshot while
     # joining the same immutable user turn. The already-running canonical
     # Codex execution owns its original evidence snapshot. Its durable SDK
-    # thread checkpoint can also materialize between exact deliveries.
-    # Neither recovery field may start another execution or create an identity
-    # error; the graph bootstrap independently validates the thread identity.
+    # thread and final-result checkpoints can also materialize between exact
+    # deliveries. Neither recovery field may start another execution or create
+    # an identity error; graph bootstrap independently validates both.
     payload.pop("querySummary", None)
     payload.pop("codexThreadId", None)
     canonical = json.dumps(

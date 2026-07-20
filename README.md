@@ -47,6 +47,13 @@ Security boundaries:
   resume the same SDK thread after a service restart. The checkpoint is
   internal-only, tenant/access checked, compare-and-set, and never appears in
   browser activity logs;
+- after SDK completion and output guardrails, LunarAgent privately checkpoints
+  the bounded typed final response against the same active request, request
+  fingerprint, and Codex thread before ordinary HTTP delivery. A replacement
+  process validates the checkpoint hash and exact identities during graph
+  bootstrap and can return it without repeating graph research, web research,
+  or command execution. Backend terminal completion, failure, or cancellation
+  clears the checkpoint, and stale worker snapshots cannot overwrite it;
 - when a medium-reasoning SDK stream has no new event for 12 seconds, a
   bounded liveness-only activity pulse keeps Explorer visibly responsive. It
   repeats no more than once every 20 seconds, stops after 24 pulses or

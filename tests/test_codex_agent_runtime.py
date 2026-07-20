@@ -11,7 +11,10 @@ import httpx
 import pytest
 
 from lunar_agent import codex_agent as codex_module
-from lunar_agent.models import ExplorerAgentRespondRequest
+from lunar_agent.models import (
+    ExplorerAgentRespondRequest,
+    ExplorerAgentRespondResponse,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -304,6 +307,7 @@ process.stdout.write(JSON.stringify({
     monkeypatch.setenv("LUNAR_AGENT_BACKEND_SHARED_TOKEN", "must-not-leak")
     events = []
     checkpoints = []
+    result_checkpoints = []
 
     async def bootstrap(_request):
         return {
@@ -318,12 +322,17 @@ process.stdout.write(JSON.stringify({
         checkpoints.append(codex_thread_id)
         return True
 
+    async def checkpoint_result(response):
+        result_checkpoints.append(response)
+        return True
+
     response = asyncio.run(
         codex_module.run_explorer_codex_turn(
             _request(),
             graph_bootstrap=bootstrap,
             event_sink=sink,
             checkpoint_sink=checkpoint,
+            result_checkpoint_sink=checkpoint_result,
         )
     )
 
@@ -331,6 +340,9 @@ process.stdout.write(JSON.stringify({
     assert response.codexThreadId == "codex-1"
     assert response.entities[0]["label"] == "Acme"
     assert checkpoints == ["codex-1"]
+    assert len(result_checkpoints) == 1
+    assert result_checkpoints[0].reply == "Grounded result"
+    assert result_checkpoints[0].codexThreadId == "codex-1"
     assert events == [
         (
             "tool.progress",
@@ -386,6 +398,7 @@ process.stdout.write(JSON.stringify({
         str(tmp_path / "work"),
     )
     checkpoints = []
+    result_checkpoints = []
 
     async def bootstrap(_request):
         return {
@@ -401,6 +414,10 @@ process.stdout.write(JSON.stringify({
         checkpoints.append(codex_thread_id)
         return True
 
+    async def checkpoint_result(response):
+        result_checkpoints.append(response)
+        return True
+
     async def sink(_event_type, _data):
         return None
 
@@ -409,11 +426,235 @@ process.stdout.write(JSON.stringify({
         graph_bootstrap=bootstrap,
         event_sink=sink,
         checkpoint_sink=checkpoint,
+        result_checkpoint_sink=checkpoint_result,
     ))
 
     assert response.reply == "Recovered grounded result"
     assert response.codexThreadId == "codex-durable-1"
     assert checkpoints == ["codex-durable-1"]
+    assert len(result_checkpoints) == 1
+    assert result_checkpoints[0].reply == "Recovered grounded result"
+
+
+def test_runtime_replays_a_verified_durable_result_without_launching_codex(
+    tmp_path,
+    monkeypatch,
+):
+    runner = tmp_path / "runner-must-not-launch.mjs"
+    runner.write_text("// present but must not launch", encoding="utf-8")
+    mcp = tmp_path / "mcp.mjs"
+    mcp.write_text("// present", encoding="utf-8")
+    monkeypatch.setattr(codex_module, "_runner_path", lambda: runner)
+    monkeypatch.setattr(codex_module, "_mcp_server_path", lambda: mcp)
+
+    response = ExplorerAgentRespondResponse(
+        reply="Recovered without repeating research",
+        actions=[],
+        followUps=["Inspect Acme"],
+        model="gpt-5.6-sol",
+        codexThreadId="codex-durable-1",
+        entities=[{"id": "company/acme", "label": "Acme"}],
+        citations=[],
+    )
+
+    async def bootstrap(_request):
+        return {
+            "token": "delegated-read-only-token",
+            "toolsUrl": (
+                "https://backend.example.test/"
+                "api/v1/graph/ai-agent/codex-tools"
+            ),
+            "codexThreadId": "codex-durable-1",
+            "resultCheckpoint": {
+                "requestId": "turn-0001",
+                "codexThreadId": "codex-durable-1",
+                "resultFingerprint": (
+                    codex_module._runtime_result_fingerprint(response)
+                ),
+                "response": response.model_dump(
+                    mode="json",
+                    exclude_none=False,
+                ),
+            },
+        }
+
+    async def fail_process_launch(*_args, **_kwargs):
+        raise AssertionError("durable result replay launched a new process")
+
+    async def fail_thread_checkpoint(_codex_thread_id):
+        raise AssertionError("durable result replay rewrote thread checkpoint")
+
+    async def fail_result_checkpoint(_response):
+        raise AssertionError("durable result replay rewrote result checkpoint")
+
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        fail_process_launch,
+    )
+
+    replayed = asyncio.run(codex_module.run_explorer_codex_turn(
+        _request(),
+        graph_bootstrap=bootstrap,
+        checkpoint_sink=fail_thread_checkpoint,
+        result_checkpoint_sink=fail_result_checkpoint,
+    ))
+
+    assert replayed == response
+
+
+def test_runtime_rejects_a_tampered_durable_result_checkpoint(
+    tmp_path,
+    monkeypatch,
+):
+    runner = tmp_path / "runner-must-not-launch.mjs"
+    runner.write_text("// present but must not launch", encoding="utf-8")
+    mcp = tmp_path / "mcp.mjs"
+    mcp.write_text("// present", encoding="utf-8")
+    monkeypatch.setattr(codex_module, "_runner_path", lambda: runner)
+    monkeypatch.setattr(codex_module, "_mcp_server_path", lambda: mcp)
+    events = []
+
+    async def bootstrap(_request):
+        return {
+            "token": "delegated-read-only-token",
+            "toolsUrl": (
+                "https://backend.example.test/"
+                "api/v1/graph/ai-agent/codex-tools"
+            ),
+            "codexThreadId": "codex-durable-1",
+            "resultCheckpoint": {
+                "requestId": "turn-0001",
+                "codexThreadId": "codex-durable-1",
+                "resultFingerprint": "a" * 64,
+                "response": {
+                    "reply": "Tampered result",
+                    "actions": [],
+                    "followUps": [],
+                    "model": "gpt-5.6-sol",
+                    "codexThreadId": "codex-durable-1",
+                    "entities": [],
+                    "citations": [],
+                },
+            },
+        }
+
+    async def sink(event_type, data):
+        events.append((event_type, data))
+
+    with pytest.raises(codex_module.ExplorerCodexRuntimeError) as exc_info:
+        asyncio.run(codex_module.run_explorer_codex_turn(
+            _request(),
+            graph_bootstrap=bootstrap,
+            event_sink=sink,
+        ))
+
+    assert exc_info.value.code == "graph_session_stale"
+    assert events[-1][1]["errorCode"] == "graph_session_stale"
+
+
+def test_runtime_result_checkpoint_transport_retries_exact_payload(
+    monkeypatch,
+):
+    response = ExplorerAgentRespondResponse(
+        reply="Grounded result",
+        model="gpt-5.6-sol",
+        codexThreadId="codex-durable-1",
+    )
+    calls = []
+    delays = []
+
+    async def post_backend(path, payload, timeout_seconds):
+        calls.append((path, payload, timeout_seconds))
+        if len(calls) < 3:
+            request = httpx.Request(
+                "POST",
+                "https://backend.example.test/runtime-result-checkpoint",
+            )
+            raise httpx.ConnectError(
+                "temporary transport failure",
+                request=request,
+            )
+        return {"accepted": True, "status": "generating"}
+
+    async def sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(codex_module, "_post_backend", post_backend)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    accepted = asyncio.run(
+        codex_module._forward_runtime_result_checkpoint(
+            _request(),
+            response,
+        )
+    )
+
+    assert accepted is True
+    assert len(calls) == 3
+    assert delays == [0.25, 1.0]
+    assert all(
+        call[0]
+        == "/api/v1/graph/ai-agent/tools/runtime-result-checkpoint"
+        for call in calls
+    )
+    assert all(call[1] == calls[0][1] for call in calls)
+    assert calls[0][1]["request_id"] == "turn-0001"
+    assert calls[0][1]["codex_thread_id"] == "codex-durable-1"
+    assert calls[0][1]["result"]["reply"] == "Grounded result"
+
+
+def test_runtime_fails_closed_when_backend_rejects_final_result_checkpoint(
+    tmp_path,
+    monkeypatch,
+):
+    runner = tmp_path / "result-runner.mjs"
+    runner.write_text(
+        """
+for await (const _chunk of process.stdin) {}
+process.stdout.write(JSON.stringify({
+  kind: "result",
+  codexThreadId: "codex-1",
+  model: "gpt-5.6-sol",
+  finalResponse: "Grounded result",
+  actions: [],
+  followUps: [],
+  entities: [],
+  citations: []
+}) + "\\n");
+""".strip(),
+        encoding="utf-8",
+    )
+    mcp = tmp_path / "mcp.mjs"
+    mcp.write_text("// present", encoding="utf-8")
+    monkeypatch.setattr(codex_module, "_runner_path", lambda: runner)
+    monkeypatch.setattr(codex_module, "_mcp_server_path", lambda: mcp)
+    monkeypatch.setattr(
+        codex_module.settings,
+        "codex_agent_workspace_root",
+        str(tmp_path / "work"),
+    )
+
+    async def bootstrap(_request):
+        return {
+            "token": "delegated-read-only-token",
+            "toolsUrl": (
+                "https://backend.example.test/"
+                "api/v1/graph/ai-agent/codex-tools"
+            ),
+        }
+
+    async def reject_result(_response):
+        return False
+
+    with pytest.raises(codex_module.ExplorerCodexRuntimeError) as exc_info:
+        asyncio.run(codex_module.run_explorer_codex_turn(
+            _request(),
+            graph_bootstrap=bootstrap,
+            result_checkpoint_sink=reject_result,
+        ))
+
+    assert exc_info.value.code == "graph_session_stale"
 
 
 def test_runtime_rejects_conflicting_backend_thread_checkpoint(
