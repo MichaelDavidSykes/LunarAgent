@@ -194,10 +194,9 @@ export function collectGraphCitationEvidence(value) {
   if (value.report && typeof value.report === "object" && !Array.isArray(value.report)) {
     candidates.push(value.report);
   }
-  const reportLists = [value.neighborhood?.reports];
-  for (const reports of reportLists) {
-    if (!Array.isArray(reports)) continue;
-    candidates.push(...reports.slice(0, MAX_GRAPH_EVIDENCE_CITATIONS));
+  const neighborhoodReports = value.neighborhood?.reports;
+  if (Array.isArray(neighborhoodReports)) {
+    candidates.push(...neighborhoodReports.slice(0, MAX_GRAPH_EVIDENCE_CITATIONS));
   }
 
   const citations = [];
