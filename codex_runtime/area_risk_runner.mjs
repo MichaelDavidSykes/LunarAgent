@@ -25,6 +25,7 @@ if (
 
 const MAX_PROMPT_CHARS = 48_000;
 const MAX_ZONES = 6;
+const MAX_ZONE_RADIUS_M = 2_500;
 const ALLOWED_RESULT_ITEM_TYPES = new Set([
   "agent_message",
   "reasoning",
@@ -79,7 +80,7 @@ function outputSchema(maxZones) {
             },
             lat: nullableNumber,
             lon: nullableNumber,
-            radius_m: { type: ["integer", "null"], minimum: 50, maximum: 10_000 },
+            radius_m: { type: ["integer", "null"], minimum: 50, maximum: MAX_ZONE_RADIUS_M },
             coordinates: {
               type: "array",
               maxItems: 24,

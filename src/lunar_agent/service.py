@@ -22,6 +22,9 @@ EXPLORER_AGENT_MAX_COMPLETION_TOKEN_CAP = 2000
 EXPLORER_AGENT_MAX_LEGACY_TOKEN_CAP = 1400
 GRAPH_SCOPE_ACTION_TYPES = {"apply_graph_query_scope", "save_and_apply_graph_query_scope"}
 VERIFIED_SCOPE_ACTION_KEY = "_lunarAgentVerifiedScopeAction"
+SAFE_ROUTE_AREA_RISK_MAX_RADIUS_M = 2500.0
+SAFE_ROUTE_AREA_RISK_MAX_AXIS_M = 5250.0
+SAFE_ROUTE_AREA_RISK_MAX_DIAMETER_M = 8000.0
 
 
 def _trim_text(value: Any, max_len: int = 240) -> str:
@@ -348,6 +351,36 @@ def _normalize_area_risk_coordinates(value: Any) -> list[dict[str, float]]:
             continue
         coordinates.append({"lat": lat, "lon": lon})
     return coordinates
+
+
+def _area_risk_distance_m(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
+    lat1 = math.radians(lat_a)
+    lat2 = math.radians(lat_b)
+    delta_lat = math.radians(lat_b - lat_a)
+    delta_lon = math.radians(lon_b - lon_a)
+    hav = math.sin(delta_lat / 2.0) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2.0) ** 2
+    return 6_371_000.0 * 2.0 * math.atan2(math.sqrt(hav), math.sqrt(max(0.0, 1.0 - hav)))
+
+
+def _area_risk_geometry_within_hard_stop(coordinates: list[dict[str, float]]) -> bool:
+    if len(coordinates) < 2:
+        return True
+    min_lat = min(point["lat"] for point in coordinates)
+    max_lat = max(point["lat"] for point in coordinates)
+    min_lon = min(point["lon"] for point in coordinates)
+    max_lon = max(point["lon"] for point in coordinates)
+    center_lat = (min_lat + max_lat) / 2.0
+    center_lon = (min_lon + max_lon) / 2.0
+    if _area_risk_distance_m(min_lat, center_lon, max_lat, center_lon) > SAFE_ROUTE_AREA_RISK_MAX_AXIS_M:
+        return False
+    if _area_risk_distance_m(center_lat, min_lon, center_lat, max_lon) > SAFE_ROUTE_AREA_RISK_MAX_AXIS_M:
+        return False
+    return all(
+        _area_risk_distance_m(left["lat"], left["lon"], right["lat"], right["lon"])
+        <= SAFE_ROUTE_AREA_RISK_MAX_DIAMETER_M
+        for index, left in enumerate(coordinates)
+        for right in coordinates[index + 1 :]
+    )
 
 
 def _normalize_module_key(value: Any) -> str | None:
@@ -2539,7 +2572,8 @@ def build_safe_route_area_risk_evidence_prompt(
             "Prioritise areas with current or recurring public evidence of violent crime, gang violence, hijacking/carjacking, robbery, extortion, kidnapping, unrest, or severe road-safety disruption.",
             "Do not include an area solely because it is poor, informal, high-density, lacks services, has sanitation issues, or is socially vulnerable.",
             "Each zone must include evidence_urls from supplied evidence or current public web sources.",
-            "Prefer smaller locality-level centers with radius_m around 500-2500m. Use larger radii only for a named township/locality with a genuinely broad footprint.",
+            "Every zone must be locality-level and radius_m must be 2500m or less. This is a hard maximum with no city, county, province, country, or AOI-wide exception.",
+            "If a supported risk spans several localities, return independently evidenced smaller localities or omit it; never approximate the whole city as one zone.",
             "Return each real-world locality once. Do not emit synonymous, nested, or overlapping broad-and-small versions of the same place.",
             "Before returning, compare all proposed zones and keep the best-supported boundary when two zones describe the same locality.",
             "If you cannot identify specific named areas, return zones=[].",
@@ -2618,10 +2652,10 @@ def build_safe_route_area_risk_web_prompt(
             "Use web research to identify specific named localities with public evidence.",
             "Focus especially on townships, high-crime areas, gang-affected localities, hijacking/carjacking hotspots, robbery/extortion hotspots, and unrest-prone areas.",
             "Only include informal settlements or deprived areas when public sources connect that named place to crime, violence, unrest, hijacking, robbery, extortion, or other direct public-safety risk.",
-            "Keep each zone small and locality-specific. radius_m should usually be 500-2500.",
+            "Keep each zone small and locality-specific. radius_m must be 500-2500 and 2500m is a hard maximum.",
             "Include public source URLs for every zone.",
             "Use approximate public-safety mapping only. Do not include tactical attack guidance or operational advice.",
-            "If the evidence supports a larger named township, use its approximate center and a radius that covers the township, not the whole AOI.",
+            "If a named township is larger than the hard maximum, return independently evidenced smaller localities inside it or omit it; never shrink a city-scale claim into a falsely precise circle.",
             "Return each real-world locality once and remove synonymous or nested overlapping duplicates before responding.",
             "If you cannot identify named localities, return an empty zones array.",
         ],
@@ -2642,7 +2676,7 @@ def build_safe_route_area_risk_web_prompt(
                     "confidence": "source-backed | modelled | analyst-reviewed",
                     "lat": "center latitude if known",
                     "lon": "center longitude if known",
-                    "radius_m": "500-2500 for most named localities",
+                    "radius_m": "500-2500; hard maximum 2500",
                     "coordinates": [{"lat": "number", "lon": "number"}],
                     "display_color": "green | orange | red",
                     "icon": "warning | building | shield | alert",
@@ -2731,6 +2765,8 @@ def normalize_safe_route_area_risk_payload(
         lat = _coerce_bounded_float(raw_zone.get("lat"), -90, 90)
         lon = _coerce_bounded_float(raw_zone.get("lon") if raw_zone.get("lon") is not None else raw_zone.get("lng"), -180, 180)
         coordinates = _normalize_area_risk_coordinates(raw_zone.get("coordinates"))
+        if not _area_risk_geometry_within_hard_stop(coordinates):
+            continue
         if (lat is None) != (lon is None) and aoi_bounds:
             continue
         if lat is None and lon is None and len(coordinates) >= 3:
@@ -2743,12 +2779,18 @@ def normalize_safe_route_area_risk_payload(
             or any(not _point_in_safe_route_aoi(point["lat"], point["lon"], aoi_bounds) for point in coordinates)
         ):
             coordinates = []
+        raw_radius = raw_zone.get("radius_m") or raw_zone.get("radiusM") or (1200 if aoi_bounds else None)
+        parsed_radius = _coerce_finite_float(raw_radius)
+        if parsed_radius is not None and parsed_radius > SAFE_ROUTE_AREA_RISK_MAX_RADIUS_M:
+            continue
         radius = _coerce_bounded_float(
-            raw_zone.get("radius_m") or raw_zone.get("radiusM") or (1200 if aoi_bounds else None),
+            raw_radius,
             200 if aoi_bounds else 0,
-            15000 if aoi_bounds else 100000,
+            SAFE_ROUTE_AREA_RISK_MAX_RADIUS_M,
         )
         if aoi_bounds and radius is None:
+            continue
+        if not _area_risk_geometry_within_hard_stop(coordinates):
             continue
 
         normalized_zone = {

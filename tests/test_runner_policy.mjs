@@ -112,6 +112,8 @@ test("area-risk account fallback permits web evidence but no local execution or 
   assert.match(areaRiskRunner, /webSearchCompleted/);
   assert.match(areaRiskRunner, /verifiedSourceUrls/);
   assert.match(areaRiskRunner, /safePublicUrl/);
+  assert.match(areaRiskRunner, /MAX_ZONE_RADIUS_M = 2_500/);
+  assert.match(areaRiskRunner, /maximum: MAX_ZONE_RADIUS_M/);
   assert.doesNotMatch(areaRiskRunner, /mcpServers/);
   assert.doesNotMatch(areaRiskRunner, /OPENAI_API_KEY/);
   assert.doesNotMatch(areaRiskRunner, /LUNAR_AGENT_SHARED_TOKEN/);
