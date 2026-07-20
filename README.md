@@ -202,7 +202,10 @@ server-side live web research capability as Explorer, has MCP/shell/file and
 local-network access disabled, and never receives `OPENAI_API_KEY` or Lunar
 service credentials. If both
 providers fail, the request fails truthfully so the caller can retry instead of
-recording a false successful zero-zone result.
+recording a false successful zero-zone result. Both providers are constrained
+to locality-level zones with a hard 2,500 metre radius ceiling; city-scale
+radius or coordinate geometry is rejected rather than silently shrunk into a
+falsely precise hotspot.
 
 Explorer turns cannot run commands or create files. The former host command
 broker, its Unix socket, host workspace mount, deployment unit, and MCP tool

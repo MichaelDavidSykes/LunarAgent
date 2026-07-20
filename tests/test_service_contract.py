@@ -1853,6 +1853,26 @@ def test_area_risk_normalization_enforces_aoi_and_verified_sources():
                     "radius_m": 100000,
                     "evidence_urls": ["https://example.test/verified"],
                 },
+                {
+                    "label": "Just over hard radius",
+                    "lat": -33.8,
+                    "lon": 18.7,
+                    "radius_m": 2501,
+                    "evidence_urls": ["https://example.test/verified"],
+                },
+                {
+                    "label": "City-scale coordinates with small declared radius",
+                    "lat": -33.93,
+                    "lon": 18.50,
+                    "radius_m": 1200,
+                    "coordinates": [
+                        {"lat": -34.10, "lon": 18.30},
+                        {"lat": -34.10, "lon": 18.70},
+                        {"lat": -33.75, "lon": 18.70},
+                        {"lat": -33.75, "lon": 18.30},
+                    ],
+                    "evidence_urls": ["https://example.test/verified"],
+                },
             ]
         },
         max_zones=8,
@@ -1861,6 +1881,53 @@ def test_area_risk_normalization_enforces_aoi_and_verified_sources():
     )
 
     assert [zone["label"] for zone in payload["zones"]] == ["Inside AOI"]
+
+
+def test_area_risk_payload_normalization_accepts_hard_radius_and_geometry_boundary():
+    payload = service_module.normalize_safe_route_area_risk_payload(
+        {
+            "zones": [
+                {
+                    "label": "Bounded district hotspot",
+                    "lat": -33.93,
+                    "lon": 18.50,
+                    "radius_m": 2500,
+                    "coordinates": [
+                        {"lat": -33.952, "lon": 18.473},
+                        {"lat": -33.952, "lon": 18.527},
+                        {"lat": -33.908, "lon": 18.527},
+                        {"lat": -33.908, "lon": 18.473},
+                    ],
+                    "evidence_urls": ["https://example.test/verified"],
+                }
+            ]
+        },
+        max_zones=8,
+        aoi={"bounds": {"minLat": -34.2, "minLon": 18.2, "maxLat": -33.5, "maxLon": 19.0}},
+        verified_source_urls={"https://example.test/verified"},
+    )
+
+    assert [zone["label"] for zone in payload["zones"]] == ["Bounded district hotspot"]
+    assert payload["zones"][0]["radius_m"] == 2500
+
+
+def test_area_risk_prompts_enforce_city_scale_hard_stop():
+    aoi = {"bounds": {"minLat": -34.2, "minLon": 18.2, "maxLat": -33.5, "maxLon": 19.0}}
+    evidence_prompt = service_module.build_safe_route_area_risk_evidence_prompt(
+        aoi=aoi,
+        evidence=[],
+        max_zones=6,
+    )
+    web_prompt = service_module.build_safe_route_area_risk_web_prompt(
+        aoi=aoi,
+        evidence=[],
+        max_zones=6,
+    )
+
+    assert "hard maximum" in evidence_prompt
+    assert "no city, county, province, country, or AOI-wide exception" in evidence_prompt
+    assert "hard maximum" in web_prompt
+    assert "never shrink a city-scale claim" in web_prompt
 
 
 def test_area_risk_evidence_fallback_extracts_source_backed_localities():
