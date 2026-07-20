@@ -21,16 +21,23 @@ This keeps auth and graph access in the backend while still letting the agent do
 `POST /v1/explorer-agent/respond` runs a persistent Codex SDK thread using
 ChatGPT-managed Codex authentication rather than `OPENAI_API_KEY` billing.
 The runtime is configured for `gpt-5.6-sol` with `medium` reasoning, live web
-research, workspace-scoped command execution, and the LunarGraph MCP bridge.
+research, a read-only/no-host-execution policy, and the LunarGraph MCP bridge.
 
 Security boundaries:
 
 - the browser never receives ChatGPT auth, graph credentials, or service tokens;
 - the Python service launches Codex with a scrubbed environment;
-- a least-privilege Codex permission profile denies model-generated commands
-  from reading `CODEX_HOME` (including `auth.json`) or Linux process metadata;
-- shell commands have no direct network path; current research uses Codex's
-  native live web-search tool and graph access uses the scoped MCP bridge;
+- the checked `codex_runtime/execution_policy.json` contract forces the Codex
+  SDK to `sandboxMode=read-only`, disables SDK network access, and declares
+  host commands and file writes unavailable;
+- the MCP bridge registers only read-only LunarGraph evidence tools. It exposes
+  no shell, code execution, file, host, or command-broker tool;
+- any unexpected SDK command or file-change event aborts the turn and maps to
+  a safe policy failure instead of being presented as successful work;
+- a least-privilege Codex permission profile also denies access to
+  `CODEX_HOME` (including `auth.json`) and Linux process metadata;
+- live public research uses Codex's native web-search capability, while graph
+  access uses the scoped MCP bridge;
 - graph access uses a short-lived, per-turn, read-only delegated token;
 - each MCP process enforces per-turn logical evidence budgets: four curated
   graph searches, six report reads, two schema inspections, and four custom
@@ -52,15 +59,15 @@ Security boundaries:
   fingerprint, and Codex thread before ordinary HTTP delivery. A replacement
   process validates the checkpoint hash and exact identities during graph
   bootstrap and can return it without repeating graph research, web research,
-  or command execution. Backend terminal completion, failure, or cancellation
+  or local execution. Backend terminal completion, failure, or cancellation
   clears the checkpoint, and stale worker snapshots cannot overwrite it;
 - when a medium-reasoning SDK stream has no new event for 12 seconds, a
   bounded liveness-only activity pulse keeps Explorer visibly responsive. It
   repeats no more than once every 20 seconds, stops after 24 pulses or
   immediately on completion/cancellation, and reports no inferred work,
   reasoning text, or hidden chain-of-thought;
-- credential-shaped content is removed from command text/output, tool results,
-  activity events, final Markdown, entity fields, citations, and follow-ups
+- credential-shaped content is removed from tool results, activity events,
+  final Markdown, entity fields, citations, and follow-ups
   before any of those values can reach the browser;
 - citation links fail closed unless either the exact normalized URL appeared in
   a completed LunarGraph tool result's explicit source/link field or the
@@ -185,50 +192,16 @@ uses the ChatGPT-managed authentication mounted at `CODEX_HOME`. The separate
 legacy SafeRoute area-risk endpoint still requires `OPENAI_API_KEY`; that key is
 not used for Explorer LunarAgent turns.
 
-Explorer workspace commands do not run inside the authentication-bearing Agent
-container. Codex calls the `run_workspace_command` MCP tool, which reaches a
-token-authenticated Unix-socket broker. The broker executes each command inside
-a fresh Bubblewrap namespace with:
+Explorer turns cannot run commands or create files. The former host command
+broker, its Unix socket, host workspace mount, deployment unit, and MCP tool
+have been removed. The Agent still starts each Codex runner in its own process
+group and terminates that group on cancellation. The MCP bridge monitors its
+exact runner process identity and exits when the owner disappears.
 
-- no network namespace connectivity;
-- only `/usr`, a minimal `/dev` and `/proc`, a private `/tmp`, and the opaque
-  per-session workspace mounted;
-- no Codex home, LunarChain services, environment secrets, host home directory,
-  or tenant data mounts;
-- cleared environment variables, resource limits, concurrency limits, bounded
-  output, a hard deadline, and content-level credential redaction.
-
-The Agent health route fails closed when this command sandbox is unavailable.
-The broker health contract runs and briefly caches a real isolated probe; it
-verifies namespace setup, the private workspace, absence of mounted auth/backend
-secrets, and rejection of IP sockets rather than reporting ready from binary
-presence alone.
-The runtime never treats a failed command as verified, and the final response
-receives a deterministic warning if a model attempts to claim otherwise.
-When a Codex turn is stopped, terminating the Agent-side runner closes its
-Unix-socket command request. The broker monitors that request connection across
-queueing and execution; a disconnect cancels and reaps the complete Bubblewrap
-process group instead of allowing a previously started command to continue
-after the Explorer session is cancelled. The Agent starts each Codex runner in
-its own process group and terminates that whole group on cancellation, ensuring
-the MCP client closes its broker request and triggers the same cleanup boundary.
-The MCP bridge also monitors its exact runner process identity and exits if that
-owner disappears, covering SDK child processes that move into a separate process
-group before invoking the broker.
-The broker and Agent container share UID `10001` for the protected broker socket,
-but the host command-workspace root is deliberately not mounted into the Agent
-container. The broker lazily creates the opaque host workspace on the first
-command, while Codex receives a separate session cwd on the container's private
-`/tmp`. A turn therefore cannot inspect a sibling session's command files.
-Commands for the same investigation workspace are serialized, while commands
-for two different investigations may use the bounded global concurrency in
-parallel. Inactive host workspaces are removed after 24 hours by default;
-`LUNAR_AGENT_COMMAND_WORKSPACE_TTL_SECONDS` and
-`LUNAR_AGENT_COMMAND_WORKSPACE_CLEANUP_INTERVAL_SECONDS` can narrow or extend
-that bounded temporary retention. Active and executable-health workspaces are
-never removed. The per-command process ceiling accounts for Codex threads
-charged to the shared UID, while the broker's independent systemd `TasksMax`
-cgroup stays the tighter process boundary for command execution.
+The Agent health route fails closed unless it can load the exact checked
+read-only policy. Its `commandSandbox` compatibility field reports
+`mode=read-only-no-host-exec`, `sandboxMode=read-only`,
+`networkAccessEnabled=false`, `hostCommands=false`, and `fileWrites=false`.
 
 Callers must send the configured `LUNAR_AGENT_SHARED_TOKEN`:
 
@@ -246,46 +219,10 @@ npm ci
 uvicorn lunar_agent.main:app --reload --port 8310
 ```
 
-The production command broker runs separately as
-`lunar-agent-command-broker.service`; see `deploy/`. It requires Bubblewrap,
-the dedicated unprivileged `lunaragent` account, a root-owned environment file
-containing the broker token, and the shared workspace directory. The Agent
-container receives only the broker socket and broker token; it does not receive
-the host command-workspace mount. The broker unit pins `PYTHONPATH` to the
-root-controlled `current/src` release link, so an atomic release-link change
-and service restart loads the exact staged broker source rather than a stale
-package previously installed in the shared dependency virtual environment.
-`deploy/lunar-agent.service` preserves the existing read-only, capability-free
-Agent container boundary and adds only the read-only socket mount. The broker itself runs as
-the unprivileged host account with systemd hardening. Its only allowed socket
-families are Unix sockets and the netlink socket Bubblewrap needs to create a
-private, disconnected network namespace.
-The Agent unit is bound to and part of the broker unit's restart lifecycle. A
-broker restart therefore also recreates the Agent container, remounting the
-current Unix-socket directory and reloading a rotated broker token instead of
-leaving a stale socket or credential in a long-lived container.
-
-Ubuntu hosts that enforce restricted unprivileged user namespaces must install
-the repository's narrow AppArmor exception for a dedicated, group-restricted
-Bubblewrap executable. Do not relax the host-wide
-`unprivileged_userns` profile:
-
-```bash
-install -d -o root -g lunaragent -m 0750 /opt/lunar-agent-command-broker/bin
-install -o root -g lunaragent -m 0750 \
-  /usr/bin/bwrap /opt/lunar-agent-command-broker/bin/bwrap
-install -o root -g root -m 0644 \
-  deploy/lunar-agent-command-broker.apparmor \
-  /etc/apparmor.d/lunar-agent-command-broker-bwrap
-apparmor_parser -r /etc/apparmor.d/lunar-agent-command-broker-bwrap
-```
-
-The broker environment must then set
-`LUNAR_AGENT_BWRAP_BINARY=/opt/lunar-agent-command-broker/bin/bwrap`. The
-AppArmor exception is attached only to that root-owned executable, which is
-executable only by the dedicated service group. The systemd unit keeps the
-broker unprivileged with no ambient capabilities; the bounded namespace setup
-capabilities are available only inside Bubblewrap's new user namespace.
+`deploy/lunar-agent.service` runs the authentication-bearing Agent container
+read-only, non-root, capability-free, with `no-new-privileges`, bounded
+resources, and a private tmpfs. It has no command socket or host workspace
+mount.
 
 ## Backend Wiring
 
@@ -319,9 +256,9 @@ delegated-token HTTP call ceiling.
 Provision Codex authentication interactively on the host and store it outside
 the repository. The systemd unit expects the protected host directory
 `/etc/lunar-agent/codex` to be mounted at `/codex-auth`. Built-in Codex shell
-execution remains denied from this authentication-bearing container; all
-commands are delegated to the credential-free command broker sandbox described
-above. Set host ownership to container UID `10001`, restrict directory
+execution and file mutation are denied by the checked read-only execution
+policy; no command broker is available. Set host ownership to container UID
+`10001`, restrict directory
 permissions, and treat `auth.json` like a password. Never commit or print its
 contents.
 

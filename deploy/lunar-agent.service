@@ -1,15 +1,11 @@
 [Unit]
 Description=LunarAgent private reasoning service
 Wants=network-online.target docker.service
-Requires=lunar-agent-command-broker.service
-BindsTo=lunar-agent-command-broker.service
-PartOf=lunar-agent-command-broker.service
-After=network-online.target docker.service lunar-agent-command-broker.service
+After=network-online.target docker.service
 
 [Service]
 Type=simple
 EnvironmentFile=/etc/lunarengine-prefect.env
-EnvironmentFile=/etc/lunar-agent-command-broker.env
 Environment=LUNAR_AGENT_MODEL=gpt-5.1
 Environment=LUNAR_AGENT_WEB_RESEARCH_ENABLED=true
 Environment=LUNAR_AGENT_WEB_SEARCH_CONTEXT_SIZE=medium
@@ -30,7 +26,6 @@ Environment=LUNAR_AGENT_CODEX_REASONING_EFFORT=medium
 Environment=LUNAR_AGENT_CODEX_TIMEOUT=900
 Environment=LUNAR_AGENT_CODEX_MAX_CONCURRENT_REQUESTS=2
 Environment=LUNAR_AGENT_CODEX_WORKSPACE_ROOT=/tmp/lunar-agent-codex-workspaces
-Environment=LUNAR_AGENT_COMMAND_BROKER_SOCKET=/run/lunar-agent-command-broker/broker.sock
 Environment=CODEX_HOME=/codex-auth
 ExecStartPre=-/usr/bin/docker rm -f lunar-agent
 ExecStart=/usr/bin/docker run --rm \
@@ -56,11 +51,8 @@ ExecStart=/usr/bin/docker run --rm \
   --env LUNAR_AGENT_CODEX_TIMEOUT \
   --env LUNAR_AGENT_CODEX_MAX_CONCURRENT_REQUESTS \
   --env LUNAR_AGENT_CODEX_WORKSPACE_ROOT \
-  --env LUNAR_AGENT_COMMAND_BROKER_SOCKET \
-  --env LUNAR_AGENT_COMMAND_BROKER_TOKEN \
   --env CODEX_HOME \
   --volume /etc/lunar-agent/codex:/codex-auth:rw \
-  --volume /run/lunar-agent-command-broker:/run/lunar-agent-command-broker:ro \
   --publish 127.0.0.1:8310:8310 \
   --publish 172.17.0.1:8310:8310 \
   --security-opt no-new-privileges \
@@ -69,7 +61,7 @@ ExecStart=/usr/bin/docker run --rm \
   --memory 1536m \
   --cpus 4 \
   --pids-limit 256 \
-  --tmpfs /tmp:rw,exec,nosuid,size=512m \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=512m \
   lunar-agent:latest
 ExecStop=/usr/bin/docker stop lunar-agent
 Restart=always

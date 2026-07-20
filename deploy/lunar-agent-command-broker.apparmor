@@ -1,9 +1,0 @@
-# Ubuntu's restricted-unprivileged-userns policy requires an executable-bound
-# allowance. This profile applies only to the dedicated root-owned Bubblewrap
-# copy at this path; its filesystem mode must be 0750 root:lunaragent.
-abi <abi/4.0>,
-include <tunables/global>
-
-profile lunar-agent-command-broker-bwrap /opt/lunar-agent-command-broker/bin/bwrap flags=(unconfined) {
-  userns,
-}

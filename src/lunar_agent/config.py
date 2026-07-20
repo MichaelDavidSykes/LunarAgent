@@ -69,14 +69,4 @@ class Settings(BaseSettings):
         "LUNAR_AGENT_CODEX_WORKSPACE_ROOT",
         "/tmp/lunar-agent-workspaces",
     )
-    command_broker_socket: str = os.getenv(
-        "LUNAR_AGENT_COMMAND_BROKER_SOCKET",
-        "",
-    )
-    command_broker_token: str = os.getenv(
-        "LUNAR_AGENT_COMMAND_BROKER_TOKEN",
-        "",
-    )
-
-
 settings = Settings()
