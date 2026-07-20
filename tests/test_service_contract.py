@@ -2027,9 +2027,10 @@ def test_area_risk_api_quota_failure_uses_chatgpt_codex_account(monkeypatch):
 
     captured = {}
 
-    async def codex_account_analysis(prompt, *, max_zones):
+    async def codex_account_analysis(prompt, *, max_zones, evidence_urls):
         captured["prompt"] = prompt
         captured["max_zones"] = max_zones
+        captured["evidence_urls"] = evidence_urls
         return {
             "model": "gpt-5.6-sol",
             "notes": "Bounded evidence analysis completed.",
@@ -2085,8 +2086,61 @@ def test_area_risk_api_quota_failure_uses_chatgpt_codex_account(monkeypatch):
     assert result["zones"][0]["evidence_urls"] == ["https://example.test/london-risk"]
     assert result["notes"] == "Bounded evidence analysis completed."
     assert captured["max_zones"] == 3
-    assert "Analyze only the supplied public evidence" in captured["prompt"]
-    assert "Web search, graph tools, shell commands, and file access are unavailable" in captured["prompt"]
+    assert captured["evidence_urls"] == {"https://example.test/london-risk"}
+    assert "Use live public web search" in captured["prompt"]
+    assert "Graph tools, shell commands, local network access, and file access are unavailable" in captured["prompt"]
+
+
+def test_area_risk_codex_web_sources_require_completed_search_marker(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", False)
+
+    async def fail_api_analysis(*_args, **_kwargs):
+        raise RuntimeError("Responses API quota unavailable")
+
+    async def codex_web_analysis(*_args, **_kwargs):
+        return {
+            "model": "gpt-5.6-sol",
+            "webSearchCompleted": True,
+            "verifiedSourceUrls": ["https://police.example.test/brixton"],
+            "notes": "Live public web evidence verified.",
+            "zones": [
+                {
+                    "label": "Brixton",
+                    "severity": "high",
+                    "risk_score": 78,
+                    "confidence": "source-backed",
+                    "lat": 51.4627,
+                    "lon": -0.1145,
+                    "radius_m": 1200,
+                    "coordinates": [],
+                    "display_color": "red",
+                    "icon": "warning",
+                    "notes": "Recurring robbery reports affect public route safety.",
+                    "evidence_urls": ["https://police.example.test/brixton"],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(service_module, "run_openai_responses_analysis", fail_api_analysis)
+    monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", codex_web_analysis)
+
+    result = asyncio.run(
+        service_module.research_safe_route_area_risk(
+            aoi={
+                "bounds": {
+                    "minLat": 51.40,
+                    "minLon": -0.30,
+                    "maxLat": 51.60,
+                    "maxLon": -0.05,
+                }
+            },
+            evidence=[],
+            max_zones=3,
+        )
+    )
+
+    assert [zone["label"] for zone in result["zones"]] == ["Brixton"]
+    assert result["zones"][0]["evidence_urls"] == ["https://police.example.test/brixton"]
 
 
 def test_area_risk_api_and_codex_failure_is_retryable_http_failure(monkeypatch):

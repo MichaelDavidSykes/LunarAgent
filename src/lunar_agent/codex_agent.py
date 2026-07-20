@@ -392,6 +392,7 @@ async def run_area_risk_codex_analysis(
     prompt: str,
     *,
     max_zones: int,
+    evidence_urls: set[str] | None = None,
 ) -> dict[str, Any]:
     """Analyze bounded public area-risk evidence through ChatGPT-authenticated Codex."""
     if not settings.codex_agent_enabled or not settings.area_risk_codex_fallback_enabled:
@@ -416,6 +417,11 @@ async def run_area_risk_codex_analysis(
         "workspace": str(_workspace_for_area_risk()),
         "codexHome": _codex_home(),
         "codexPath": str(settings.codex_cli_path or "").strip() or None,
+        "evidenceUrls": [
+            str(item).strip()[:500]
+            for item in sorted(evidence_urls or set())[:40]
+            if str(item).strip()
+        ],
     }
     if not payload["prompt"]:
         raise ValueError("Area-risk Codex prompt is required")
@@ -480,6 +486,12 @@ async def run_area_risk_codex_analysis(
         "zones": result["zones"][: payload["maxZones"]],
         "notes": str(result.get("notes") or "").strip()[:1000],
         "model": str(result.get("model") or payload["model"]).strip()[:120],
+        "webSearchCompleted": bool(result.get("webSearchCompleted")),
+        "verifiedSourceUrls": [
+            str(item).strip()[:500]
+            for item in (result.get("verifiedSourceUrls") or [])[:24]
+            if str(item).strip()
+        ],
     }
 
 

@@ -178,12 +178,15 @@ process.stdout.write(JSON.stringify({
         codex_module.run_area_risk_codex_analysis(
             "Analyze this bounded public evidence.",
             max_zones=3,
+            evidence_urls={"https://example.test/source"},
         )
     )
 
     assert result == {
         "model": "gpt-5.6-sol",
         "notes": "account fallback",
+        "verifiedSourceUrls": [],
+        "webSearchCompleted": False,
         "zones": [
             {
                 "label": "Brixton",

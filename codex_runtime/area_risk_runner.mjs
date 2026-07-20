@@ -29,6 +29,7 @@ const ALLOWED_RESULT_ITEM_TYPES = new Set([
   "agent_message",
   "reasoning",
   "todo_list",
+  "web_search",
 ]);
 
 async function readStdin() {
@@ -121,9 +122,34 @@ function outputSchema(maxZones) {
         },
       },
       notes: { type: "string" },
+      verifiedSourceUrls: {
+        type: "array",
+        maxItems: 24,
+        items: { type: "string" },
+      },
     },
-    required: ["zones", "notes"],
+    required: ["zones", "notes", "verifiedSourceUrls"],
   };
+}
+
+function safePublicUrl(value) {
+  try {
+    const text = String(value || "").trim();
+    const parsed = new URL(text);
+    const host = parsed.hostname.toLowerCase();
+    if (!["http:", "https:"].includes(parsed.protocol) || !host || parsed.username || parsed.password) return "";
+    if (
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      host.endsWith(".local") ||
+      /^(127\.|10\.|192\.168\.|169\.254\.)/.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      host === "::1"
+    ) return "";
+    return text;
+  } catch {
+    return "";
+  }
 }
 
 async function main() {
@@ -180,7 +206,7 @@ async function main() {
     modelReasoningEffort: reasoningEffort,
     workingDirectory: workspace,
     skipGitRepoCheck: true,
-    webSearchMode: "disabled",
+    webSearchMode: "live",
     approvalPolicy: "never",
     sandboxMode: EXECUTION_POLICY.sandboxMode,
     networkAccessEnabled: EXECUTION_POLICY.networkAccessEnabled,
@@ -188,10 +214,12 @@ async function main() {
   const turn = await thread.run(prompt, {
     outputSchema: outputSchema(maxZones),
   });
+  let webSearchCompleted = false;
   for (const item of turn.items || []) {
     if (!ALLOWED_RESULT_ITEM_TYPES.has(item?.type)) {
       throw new Error(`Area-risk Codex emitted a forbidden item type: ${String(item?.type || "unknown")}`);
     }
+    if (item?.type === "web_search") webSearchCompleted = true;
   }
   let result;
   try {
@@ -199,13 +227,35 @@ async function main() {
   } catch (error) {
     throw new Error("Area-risk Codex returned invalid structured JSON", { cause: error });
   }
-  if (!result || !Array.isArray(result.zones) || typeof result.notes !== "string") {
+  if (
+    !result ||
+    !Array.isArray(result.zones) ||
+    typeof result.notes !== "string" ||
+    !Array.isArray(result.verifiedSourceUrls)
+  ) {
     throw new Error("Area-risk Codex returned an invalid structured payload");
   }
+  const suppliedEvidenceUrls = new Set(
+    (Array.isArray(input.evidenceUrls) ? input.evidenceUrls : [])
+      .map(safePublicUrl)
+      .filter(Boolean),
+  );
+  const verifiedSourceUrls = webSearchCompleted
+    ? [...new Set(result.verifiedSourceUrls.map(safePublicUrl).filter(Boolean))].slice(0, 24)
+    : [];
+  const allowedEvidenceUrls = new Set([...suppliedEvidenceUrls, ...verifiedSourceUrls]);
+  const zones = result.zones.slice(0, maxZones).map((zone) => ({
+    ...zone,
+    evidence_urls: [...new Set((zone.evidence_urls || []).map(safePublicUrl).filter(
+      (url) => url && allowedEvidenceUrls.has(url),
+    ))].slice(0, 8),
+  })).filter((zone) => zone.evidence_urls.length > 0);
   process.stdout.write(`${JSON.stringify({
-    zones: result.zones.slice(0, maxZones),
+    zones,
     notes: result.notes.slice(0, 1000),
     model,
+    webSearchCompleted,
+    verifiedSourceUrls,
   })}\n`);
 }
 
