@@ -197,8 +197,10 @@ The Explorer LunarAgent endpoint does not pass `OPENAI_API_KEY` to Codex and
 uses the ChatGPT-managed authentication mounted at `CODEX_HOME`. SafeRoute
 area-risk research keeps the OpenAI API as its primary provider, but falls back
 to that same ChatGPT-managed Codex account when the API call fails. The fallback
-receives only bounded public evidence, has web/MCP/shell/file access disabled,
-and never receives `OPENAI_API_KEY` or Lunar service credentials. If both
+receives only bounded public evidence and public AOI metadata, may use the same
+server-side live web research capability as Explorer, has MCP/shell/file and
+local-network access disabled, and never receives `OPENAI_API_KEY` or Lunar
+service credentials. If both
 providers fail, the request fails truthfully so the caller can retry instead of
 recording a false successful zero-zone result.
 

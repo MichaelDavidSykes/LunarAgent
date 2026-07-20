@@ -96,18 +96,22 @@ test("runtime is read-only and exposes no host command or file tool", () => {
   assert.doesNotMatch(mcpRuntime, /run_workspace_command|LUNAR_COMMAND_BROKER/);
 });
 
-test("area-risk account fallback is bounded and has no tools or network", () => {
+test("area-risk account fallback permits web evidence but no local execution or MCP", () => {
   assert.match(areaRiskRunner, /execution_policy\.json/);
   assert.match(areaRiskRunner, /sandboxMode: EXECUTION_POLICY\.sandboxMode/);
   assert.match(areaRiskRunner, /networkAccessEnabled: EXECUTION_POLICY\.networkAccessEnabled/);
-  assert.match(areaRiskRunner, /webSearchMode: "disabled"/);
+  assert.match(areaRiskRunner, /webSearchMode: "live"/);
   assert.match(areaRiskRunner, /approvalPolicy: "never"/);
   assert.match(areaRiskRunner, /shell_tool: false/);
   assert.match(areaRiskRunner, /unified_exec: false/);
   assert.match(areaRiskRunner, /code_mode: false/);
   assert.match(areaRiskRunner, /code_mode_host: false/);
   assert.match(areaRiskRunner, /ALLOWED_RESULT_ITEM_TYPES/);
+  assert.match(areaRiskRunner, /"web_search"/);
   assert.match(areaRiskRunner, /forbidden item type/);
+  assert.match(areaRiskRunner, /webSearchCompleted/);
+  assert.match(areaRiskRunner, /verifiedSourceUrls/);
+  assert.match(areaRiskRunner, /safePublicUrl/);
   assert.doesNotMatch(areaRiskRunner, /mcpServers/);
   assert.doesNotMatch(areaRiskRunner, /OPENAI_API_KEY/);
   assert.doesNotMatch(areaRiskRunner, /LUNAR_AGENT_SHARED_TOKEN/);
