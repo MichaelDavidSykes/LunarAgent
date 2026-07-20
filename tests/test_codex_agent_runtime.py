@@ -134,6 +134,96 @@ def test_codex_auth_probe_is_briefly_cached_and_busted_by_rotation(
     assert probe_count == 2
 
 
+def test_area_risk_codex_analysis_uses_chatgpt_auth_without_api_key(
+    tmp_path,
+    monkeypatch,
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    runner = tmp_path / "area-risk-runner.mjs"
+    runner.write_text(
+        """
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+if (process.env.OPENAI_API_KEY || process.env.LUNAR_AGENT_SHARED_TOKEN) process.exit(7);
+process.stdout.write(JSON.stringify({
+  model: payload.model,
+  notes: "account fallback",
+  zones: [{label: "Brixton", evidence_urls: ["https://example.test/source"]}]
+}));
+""",
+        encoding="utf-8",
+    )
+
+    async def chatgpt_login(_fingerprint):
+        return "chatgpt"
+
+    monkeypatch.setattr(codex_module.settings, "codex_home", str(codex_home))
+    monkeypatch.setattr(codex_module.settings, "codex_agent_enabled", True)
+    monkeypatch.setattr(codex_module.settings, "area_risk_codex_fallback_enabled", True)
+    monkeypatch.setattr(codex_module.settings, "area_risk_codex_model", "gpt-5.6-sol")
+    monkeypatch.setattr(codex_module.settings, "area_risk_codex_reasoning_effort", "low")
+    monkeypatch.setattr(codex_module.settings, "area_risk_codex_timeout", 30)
+    monkeypatch.setattr(
+        codex_module.settings,
+        "codex_agent_workspace_root",
+        str(tmp_path / "work"),
+    )
+    monkeypatch.setattr(codex_module, "_area_risk_runner_path", lambda: runner)
+    monkeypatch.setattr(codex_module, "_cached_codex_login_method", chatgpt_login)
+
+    result = asyncio.run(
+        codex_module.run_area_risk_codex_analysis(
+            "Analyze this bounded public evidence.",
+            max_zones=3,
+        )
+    )
+
+    assert result == {
+        "model": "gpt-5.6-sol",
+        "notes": "account fallback",
+        "zones": [
+            {
+                "label": "Brixton",
+                "evidence_urls": ["https://example.test/source"],
+            }
+        ],
+    }
+    assert (tmp_path / "work" / "safe-route-area-risk" / "README.md").is_file()
+
+
+def test_area_risk_codex_analysis_rejects_non_chatgpt_auth(
+    tmp_path,
+    monkeypatch,
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    runner = tmp_path / "area-risk-runner.mjs"
+    runner.write_text("process.exit(0);", encoding="utf-8")
+
+    async def api_login(_fingerprint):
+        return "api"
+
+    monkeypatch.setattr(codex_module.settings, "codex_home", str(codex_home))
+    monkeypatch.setattr(codex_module.settings, "codex_agent_enabled", True)
+    monkeypatch.setattr(codex_module.settings, "area_risk_codex_fallback_enabled", True)
+    monkeypatch.setattr(codex_module, "_area_risk_runner_path", lambda: runner)
+    monkeypatch.setattr(codex_module, "_cached_codex_login_method", api_login)
+
+    with pytest.raises(codex_module.ExplorerCodexRuntimeError) as exc_info:
+        asyncio.run(
+            codex_module.run_area_risk_codex_analysis(
+                "Analyze bounded evidence.",
+                max_zones=2,
+            )
+        )
+
+    assert exc_info.value.code == "codex_auth_unavailable"
+
+
 def _request() -> ExplorerAgentRespondRequest:
     return ExplorerAgentRespondRequest(
         sessionId="explorer-session-1",

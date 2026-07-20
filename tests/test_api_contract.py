@@ -141,15 +141,59 @@ def test_agent_rejects_invalid_bearer_token(monkeypatch):
 
 
 def test_health_reports_authentication_is_configured(monkeypatch):
+    async def configured_auth():
+        return {"configured": True, "mode": "chatgpt"}
+
     monkeypatch.setattr(main_module.settings, "shared_token", "configured-secret")
     monkeypatch.setattr(main_module.settings, "openai_api_key", "configured-openai-key")
     monkeypatch.setattr(main_module.settings, "backend_base_url", "https://backend.example.test")
     monkeypatch.setattr(main_module.settings, "backend_shared_token", "configured-backend-token")
+    monkeypatch.setattr(main_module, "codex_auth_status", configured_auth)
     response = TestClient(main_module.app).get("/health")
 
     assert response.status_code == 200
     assert response.json()["authConfigured"] is True
     assert response.json()["dependenciesConfigured"] is True
+    assert response.json()["areaRiskAnalysis"] == {
+        "apiConfigured": True,
+        "codexFallbackEnabled": True,
+        "codexFallbackReady": True,
+        "codexModel": main_module.settings.area_risk_codex_model,
+    }
+
+
+def test_health_accepts_chatgpt_area_risk_fallback_without_openai_api_key(monkeypatch):
+    async def configured_auth():
+        return {"configured": True, "mode": "chatgpt"}
+
+    monkeypatch.setattr(main_module.settings, "shared_token", "configured-secret")
+    monkeypatch.setattr(main_module.settings, "openai_api_key", "")
+    monkeypatch.setattr(main_module.settings, "backend_base_url", "https://backend.example.test")
+    monkeypatch.setattr(main_module.settings, "backend_shared_token", "configured-backend-token")
+    monkeypatch.setattr(main_module.settings, "codex_agent_enabled", True)
+    monkeypatch.setattr(main_module.settings, "area_risk_codex_fallback_enabled", True)
+    monkeypatch.setattr(main_module, "codex_auth_status", configured_auth)
+
+    response = TestClient(main_module.app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["areaRiskAnalysis"]["apiConfigured"] is False
+    assert response.json()["areaRiskAnalysis"]["codexFallbackReady"] is True
+
+
+def test_health_fails_without_api_or_ready_chatgpt_area_risk_provider(monkeypatch):
+    async def unavailable_auth():
+        return {"configured": False, "mode": "chatgpt"}
+
+    monkeypatch.setattr(main_module.settings, "shared_token", "configured-secret")
+    monkeypatch.setattr(main_module.settings, "openai_api_key", "")
+    monkeypatch.setattr(main_module.settings, "backend_base_url", "https://backend.example.test")
+    monkeypatch.setattr(main_module.settings, "backend_shared_token", "configured-backend-token")
+    monkeypatch.setattr(main_module.settings, "codex_agent_enabled", True)
+    monkeypatch.setattr(main_module.settings, "area_risk_codex_fallback_enabled", True)
+    monkeypatch.setattr(main_module, "codex_auth_status", unavailable_auth)
+
+    assert TestClient(main_module.app).get("/health").status_code == 503
 
 
 def test_health_fails_when_runtime_dependencies_are_missing(monkeypatch):

@@ -175,6 +175,12 @@ Optional:
 - `LUNAR_AGENT_AREA_RISK_MAX_EVIDENCE_ITEMS` (default `12`)
 - `LUNAR_AGENT_AREA_RISK_MAX_ZONES` (default `6`)
 - `LUNAR_AGENT_AREA_RISK_FALLBACK_ON_EMPTY_WEB` (default `false`, avoids a second model call when web research returns no named zones)
+- `LUNAR_AGENT_AREA_RISK_CODEX_FALLBACK_ENABLED` (default `true`; uses the
+  mounted ChatGPT-managed Codex account when the OpenAI API analysis fails)
+- `LUNAR_AGENT_AREA_RISK_CODEX_MODEL` (default `LUNAR_AGENT_CODEX_MODEL` or
+  `gpt-5.6-sol`)
+- `LUNAR_AGENT_AREA_RISK_CODEX_REASONING_EFFORT` (default `low`)
+- `LUNAR_AGENT_AREA_RISK_CODEX_TIMEOUT` (default `180` seconds)
 - `LUNAR_AGENT_CODEX_ENABLED` (default `true`)
 - `LUNAR_AGENT_CODEX_MODEL` (default `gpt-5.6-sol`)
 - `LUNAR_AGENT_CODEX_REASONING_EFFORT` (default `medium`)
@@ -188,9 +194,13 @@ Optional:
 - `CODEX_NODE_BINARY` (default `node`)
 
 The Explorer LunarAgent endpoint does not pass `OPENAI_API_KEY` to Codex and
-uses the ChatGPT-managed authentication mounted at `CODEX_HOME`. The separate
-legacy SafeRoute area-risk endpoint still requires `OPENAI_API_KEY`; that key is
-not used for Explorer LunarAgent turns.
+uses the ChatGPT-managed authentication mounted at `CODEX_HOME`. SafeRoute
+area-risk research keeps the OpenAI API as its primary provider, but falls back
+to that same ChatGPT-managed Codex account when the API call fails. The fallback
+receives only bounded public evidence, has web/MCP/shell/file access disabled,
+and never receives `OPENAI_API_KEY` or Lunar service credentials. If both
+providers fail, the request fails truthfully so the caller can retry instead of
+recording a false successful zero-zone result.
 
 Explorer turns cannot run commands or create files. The former host command
 broker, its Unix socket, host workspace mount, deployment unit, and MCP tool
