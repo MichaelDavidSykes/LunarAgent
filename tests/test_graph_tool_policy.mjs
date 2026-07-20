@@ -23,6 +23,16 @@ test("logical graph tool budgets are per tool and fail closed", () => {
     claimGraphToolBudget(counts, "graph-schema"),
     { allowed: true, limit: 2, used: 1 },
   );
+  for (let index = 0; index < 4; index += 1) {
+    assert.equal(
+      claimGraphToolBudget(counts, "get-graph-entity-neighborhood").allowed,
+      true,
+    );
+  }
+  assert.deepEqual(
+    claimGraphToolBudget(counts, "get-graph-entity-neighborhood"),
+    { allowed: false, limit: 4, used: 4 },
+  );
   assert.deepEqual(
     claimGraphToolBudget(counts, "unknown-tool"),
     { allowed: true, limit: 1, used: 1 },

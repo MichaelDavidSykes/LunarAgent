@@ -3,6 +3,7 @@ export const GRAPH_TOOL_LIMITS = Object.freeze({
   "search-intelligence-graph": 4,
   "run-graph-read-query": 4,
   "get-graph-report": 6,
+  "get-graph-entity-neighborhood": 4,
 });
 
 export const MAX_GRAPH_HTTP_ATTEMPTS = 2;

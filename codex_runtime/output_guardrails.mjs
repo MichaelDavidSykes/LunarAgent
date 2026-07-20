@@ -190,30 +190,44 @@ export function collectCitationEvidenceUrls(value) {
 
 export function collectGraphCitationEvidence(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-  const report = value.report;
-  if (!report || typeof report !== "object" || Array.isArray(report)) return [];
+  const candidates = [];
+  if (value.report && typeof value.report === "object" && !Array.isArray(value.report)) {
+    candidates.push(value.report);
+  }
+  const reportLists = [value.neighborhood?.reports];
+  for (const reports of reportLists) {
+    if (!Array.isArray(reports)) continue;
+    candidates.push(...reports.slice(0, MAX_GRAPH_EVIDENCE_CITATIONS));
+  }
 
-  const url = safePublicUrl(report.sourceLink);
-  const title = cleanText(report.name, 400, { singleLine: true });
-  if (!url || !title || suspiciousInstructionText(title)) return [];
-
-  const sourceName = cleanText(report.sourceName, 200, { singleLine: true });
-  const publishedAt = cleanText(report.modified, 80, { singleLine: true });
-  return [{
-    title,
-    url,
-    sourceName:
-      sourceName && !suspiciousInstructionText(sourceName)
-        ? sourceName
-        : null,
-    publishedAt:
-      publishedAt && !Number.isNaN(Date.parse(publishedAt))
-        ? publishedAt
-        : null,
-    // Report prose is untrusted evidence. It is intentionally not copied into
-    // deterministic citations even when the graph tool returned a snippet.
-    snippet: null,
-  }];
+  const citations = [];
+  const seen = new Set();
+  for (const report of candidates) {
+    if (!report || typeof report !== "object" || Array.isArray(report)) continue;
+    const url = safePublicUrl(report.sourceLink);
+    const title = cleanText(report.name, 400, { singleLine: true });
+    if (!url || !title || suspiciousInstructionText(title) || seen.has(url)) continue;
+    seen.add(url);
+    const sourceName = cleanText(report.sourceName, 200, { singleLine: true });
+    const publishedAt = cleanText(report.modified, 80, { singleLine: true });
+    citations.push({
+      title,
+      url,
+      sourceName:
+        sourceName && !suspiciousInstructionText(sourceName)
+          ? sourceName
+          : null,
+      publishedAt:
+        publishedAt && !Number.isNaN(Date.parse(publishedAt))
+          ? publishedAt
+          : null,
+      // Report prose is untrusted evidence. It is intentionally not copied into
+      // deterministic citations even when the graph tool returned a snippet.
+      snippet: null,
+    });
+    if (citations.length >= MAX_GRAPH_EVIDENCE_CITATIONS) break;
+  }
+  return citations;
 }
 
 export function collectGraphEntityEvidence(value) {
@@ -222,10 +236,15 @@ export function collectGraphEntityEvidence(value) {
   const visited = new WeakSet();
   let visitedNodes = 0;
   const evidenceContainers = new Set([
+    "entity",
     "entities",
     "highlightiocs",
+    "neighborhood",
+    "relationships",
     "report",
     "reports",
+    "source",
+    "target",
   ]);
 
   function visit(candidate, path = [], depth = 0) {
