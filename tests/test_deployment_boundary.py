@@ -22,6 +22,9 @@ def test_agent_container_has_no_host_command_surface() -> None:
     assert "--security-opt no-new-privileges" in unit
     assert "--cap-drop ALL" in unit
     assert "--tmpfs /tmp:rw,noexec,nosuid,nodev,size=512m" in unit
+    assert "Environment=LUNAR_AGENT_AREA_RISK_CODEX_FALLBACK_ENABLED=true" in unit
+    assert "Environment=LUNAR_AGENT_AREA_RISK_CODEX_MODEL=gpt-5.6-sol" in unit
+    assert "--env LUNAR_AGENT_AREA_RISK_CODEX_TIMEOUT" in unit
 
 
 def test_host_command_broker_is_not_shipped() -> None:
@@ -43,3 +46,11 @@ def test_checked_execution_policy_is_read_only() -> None:
     assert '"networkAccessEnabled": false' in policy
     assert '"hostCommands": false' in policy
     assert '"fileWrites": false' in policy
+
+
+def test_area_risk_codex_runner_is_shipped_in_the_container_context() -> None:
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    runner = REPOSITORY_ROOT / "codex_runtime" / "area_risk_runner.mjs"
+
+    assert runner.is_file()
+    assert "COPY codex_runtime ./codex_runtime" in dockerfile

@@ -47,6 +47,22 @@ class Settings(BaseSettings):
     area_risk_max_zones_per_request: int = _env_int("LUNAR_AGENT_AREA_RISK_MAX_ZONES", 6)
     area_risk_fallback_on_empty_web: bool = _env_bool("LUNAR_AGENT_AREA_RISK_FALLBACK_ON_EMPTY_WEB", False)
     area_risk_fallback_on_web_error: bool = _env_bool("LUNAR_AGENT_AREA_RISK_FALLBACK_ON_WEB_ERROR", True)
+    area_risk_codex_fallback_enabled: bool = _env_bool(
+        "LUNAR_AGENT_AREA_RISK_CODEX_FALLBACK_ENABLED",
+        True,
+    )
+    area_risk_codex_model: str = os.getenv(
+        "LUNAR_AGENT_AREA_RISK_CODEX_MODEL",
+        os.getenv("LUNAR_AGENT_CODEX_MODEL", "gpt-5.6-sol"),
+    )
+    area_risk_codex_reasoning_effort: str = os.getenv(
+        "LUNAR_AGENT_AREA_RISK_CODEX_REASONING_EFFORT",
+        "low",
+    )
+    area_risk_codex_timeout: int = _env_int(
+        "LUNAR_AGENT_AREA_RISK_CODEX_TIMEOUT",
+        180,
+    )
     shared_token: str = os.getenv("LUNAR_AGENT_SHARED_TOKEN", "")
     backend_base_url: str = os.getenv("LUNAR_AGENT_BACKEND_BASE_URL", "")
     backend_shared_token: str = os.getenv("LUNAR_AGENT_BACKEND_SHARED_TOKEN", "")

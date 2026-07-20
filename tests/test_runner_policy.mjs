@@ -14,6 +14,10 @@ const mcpPath = new URL(
   import.meta.url,
 );
 const mcpRuntime = fs.readFileSync(mcpPath, "utf8");
+const areaRiskRunner = fs.readFileSync(
+  new URL("../codex_runtime/area_risk_runner.mjs", import.meta.url),
+  "utf8",
+);
 
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -90,6 +94,23 @@ test("runtime is read-only and exposes no host command or file tool", () => {
   assert.doesNotMatch(runner, /run_workspace_command/);
   assert.doesNotMatch(runner, /commandBrokerSocket|commandBrokerToken|commandWorkspaceId/);
   assert.doesNotMatch(mcpRuntime, /run_workspace_command|LUNAR_COMMAND_BROKER/);
+});
+
+test("area-risk account fallback is bounded and has no tools or network", () => {
+  assert.match(areaRiskRunner, /execution_policy\.json/);
+  assert.match(areaRiskRunner, /sandboxMode: EXECUTION_POLICY\.sandboxMode/);
+  assert.match(areaRiskRunner, /networkAccessEnabled: EXECUTION_POLICY\.networkAccessEnabled/);
+  assert.match(areaRiskRunner, /webSearchMode: "disabled"/);
+  assert.match(areaRiskRunner, /approvalPolicy: "never"/);
+  assert.match(areaRiskRunner, /shell_tool: false/);
+  assert.match(areaRiskRunner, /unified_exec: false/);
+  assert.match(areaRiskRunner, /code_mode: false/);
+  assert.match(areaRiskRunner, /code_mode_host: false/);
+  assert.match(areaRiskRunner, /ALLOWED_RESULT_ITEM_TYPES/);
+  assert.match(areaRiskRunner, /forbidden item type/);
+  assert.doesNotMatch(areaRiskRunner, /mcpServers/);
+  assert.doesNotMatch(areaRiskRunner, /OPENAI_API_KEY/);
+  assert.doesNotMatch(areaRiskRunner, /LUNAR_AGENT_SHARED_TOKEN/);
 });
 
 test("MCP bridge exits when its owning runner disappears", async (context) => {

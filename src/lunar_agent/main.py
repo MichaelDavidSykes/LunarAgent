@@ -103,22 +103,32 @@ def require_token(authorization: str | None = Header(default=None)) -> None:
 async def health() -> dict:
     if not str(settings.shared_token or "").strip():
         raise HTTPException(status_code=503, detail="Agent authentication is unavailable")
+    codex_auth = await codex_auth_status()
+    area_risk_codex_ready = bool(
+        settings.codex_agent_enabled
+        and settings.area_risk_codex_fallback_enabled
+        and codex_auth["configured"]
+    )
     if any(
         not str(value or "").strip()
         for value in (
-            settings.openai_api_key,
             settings.backend_base_url,
             settings.backend_shared_token,
         )
-    ):
+    ) or not (str(settings.openai_api_key or "").strip() or area_risk_codex_ready):
         raise HTTPException(status_code=503, detail="Agent dependencies are not configured")
-    codex_auth = await codex_auth_status()
     return {
         "status": "ok",
         "service": settings.project_name,
         "model": settings.model,
         "authConfigured": True,
         "dependenciesConfigured": True,
+        "areaRiskAnalysis": {
+            "apiConfigured": bool(str(settings.openai_api_key or "").strip()),
+            "codexFallbackEnabled": bool(settings.area_risk_codex_fallback_enabled),
+            "codexFallbackReady": area_risk_codex_ready,
+            "codexModel": settings.area_risk_codex_model,
+        },
         "lunarAgent": {
             "enabled": bool(settings.codex_agent_enabled),
             "model": settings.codex_agent_model,

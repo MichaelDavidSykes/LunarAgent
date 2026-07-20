@@ -2015,3 +2015,141 @@ def test_area_risk_web_error_fallback_hides_provider_detail(monkeypatch):
         "notes": "Dynamic web research failed; fell back to supplied evidence only.",
     }
     assert "provider-secret-token" not in json.dumps(result)
+
+
+def test_area_risk_api_quota_failure_uses_chatgpt_codex_account(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", False)
+    monkeypatch.setattr(service_module.settings, "area_risk_model", "gpt-5.1")
+    monkeypatch.setattr(service_module.settings, "area_risk_codex_model", "gpt-5.6-sol")
+
+    async def fail_api_analysis(*_args, **_kwargs):
+        raise RuntimeError("Responses API returned HTTP 429: insufficient_quota")
+
+    captured = {}
+
+    async def codex_account_analysis(prompt, *, max_zones):
+        captured["prompt"] = prompt
+        captured["max_zones"] = max_zones
+        return {
+            "model": "gpt-5.6-sol",
+            "notes": "Bounded evidence analysis completed.",
+            "zones": [
+                {
+                    "label": "Brixton",
+                    "severity": "high",
+                    "risk_score": 78,
+                    "confidence": "source-backed",
+                    "lat": 51.4627,
+                    "lon": -0.1145,
+                    "radius_m": 1200,
+                    "coordinates": [],
+                    "display_color": "red",
+                    "icon": "warning",
+                    "notes": "Recurring robbery reports affect public route safety.",
+                    "evidence_urls": ["https://example.test/london-risk"],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(service_module, "run_openai_responses_analysis", fail_api_analysis)
+    monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", codex_account_analysis)
+
+    result = asyncio.run(
+        service_module.research_safe_route_area_risk(
+            aoi={
+                "bounds": {
+                    "minLat": 51.40,
+                    "minLon": -0.30,
+                    "maxLat": 51.60,
+                    "maxLon": -0.05,
+                },
+                "labelContext": {
+                    "place": "London",
+                    "country": "United Kingdom",
+                    "display": "Greater London, United Kingdom",
+                },
+            },
+            evidence=[
+                {
+                    "title": "Police publish public-safety update",
+                    "url": "https://example.test/london-risk",
+                    "snippet": "Reports describe recurring robbery affecting route safety.",
+                }
+            ],
+            max_zones=3,
+        )
+    )
+
+    assert result["model"] == "codex-account:gpt-5.6-sol"
+    assert [zone["label"] for zone in result["zones"]] == ["Brixton"]
+    assert result["zones"][0]["evidence_urls"] == ["https://example.test/london-risk"]
+    assert result["notes"] == "Bounded evidence analysis completed."
+    assert captured["max_zones"] == 3
+    assert "Analyze only the supplied public evidence" in captured["prompt"]
+    assert "Web search, graph tools, shell commands, and file access are unavailable" in captured["prompt"]
+
+
+def test_area_risk_api_and_codex_failure_is_retryable_http_failure(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", False)
+
+    async def fail_api_analysis(*_args, **_kwargs):
+        raise RuntimeError("Responses API returned HTTP 429: provider-secret-token")
+
+    async def fail_codex_analysis(*_args, **_kwargs):
+        raise RuntimeError("codex account usage limit with private detail")
+
+    monkeypatch.setattr(service_module, "run_openai_responses_analysis", fail_api_analysis)
+    monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", fail_codex_analysis)
+
+    with pytest.raises(RuntimeError, match="Area-risk analysis providers are unavailable") as exc_info:
+        asyncio.run(
+            service_module.research_safe_route_area_risk(
+                aoi={
+                    "bounds": {
+                        "minLat": 51.40,
+                        "minLon": -0.30,
+                        "maxLat": 51.60,
+                        "maxLon": -0.05,
+                    }
+                },
+                evidence=[],
+                max_zones=3,
+            )
+        )
+
+    assert "provider-secret-token" not in str(exc_info.value)
+    assert "private detail" not in str(exc_info.value)
+
+
+def test_area_risk_successful_empty_api_result_does_not_spend_codex_account(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", False)
+
+    async def empty_api_analysis(*_args, **_kwargs):
+        return '{"zones":[],"notes":"No supported named localities."}'
+
+    async def fail_if_codex_called(*_args, **_kwargs):  # pragma: no cover - regression only
+        raise AssertionError("Codex account fallback must only run after an API failure")
+
+    monkeypatch.setattr(service_module, "run_openai_responses_analysis", empty_api_analysis)
+    monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", fail_if_codex_called)
+
+    result = asyncio.run(
+        service_module.research_safe_route_area_risk(
+            aoi={
+                "bounds": {
+                    "minLat": 51.40,
+                    "minLon": -0.30,
+                    "maxLat": 51.60,
+                    "maxLon": -0.05,
+                }
+            },
+            evidence=[],
+            max_zones=3,
+        )
+    )
+
+    assert result == {
+        "zones": [],
+        "model": service_module.settings.area_risk_model,
+        "notes": "No supported named localities.",
+    }

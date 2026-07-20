@@ -70,6 +70,8 @@ _SAFE_FAILURE_MESSAGES = {
 }
 _codex_auth_failure_fingerprint: tuple[int, int, int] | None = None
 _codex_auth_probe_cache: tuple[tuple[int, int, int], str | None, float] | None = None
+_area_risk_codex_semaphore = asyncio.Semaphore(1)
+_MAX_AREA_RISK_RUNNER_OUTPUT_BYTES = 256_000
 
 
 class ExplorerCodexRuntimeError(RuntimeError):
@@ -324,6 +326,10 @@ def _runner_path() -> Path:
     return _project_root() / "codex_runtime" / "runner.mjs"
 
 
+def _area_risk_runner_path() -> Path:
+    return _project_root() / "codex_runtime" / "area_risk_runner.mjs"
+
+
 def _mcp_server_path() -> Path:
     return _project_root() / "codex_runtime" / "lunar_graph_mcp.mjs"
 
@@ -354,6 +360,21 @@ def _workspace_for_thread(thread_id: str) -> Path:
     return workspace
 
 
+def _workspace_for_area_risk() -> Path:
+    root = Path(settings.codex_agent_workspace_root).expanduser().resolve()
+    workspace = root / "safe-route-area-risk"
+    workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+    marker = workspace / "README.md"
+    if not marker.exists():
+        marker.write_text(
+            "# SafeRoute area-risk evidence analysis\n\n"
+            "This stateless workspace is read-only to the model. The prompt contains "
+            "only bounded public evidence and sanitized area metadata.\n",
+            encoding="utf-8",
+        )
+    return workspace
+
+
 def _safe_runner_env() -> dict[str, str]:
     path = os.getenv("PATH", "/usr/local/bin:/usr/bin:/bin")
     home = os.getenv("HOME", str(Path.home()))
@@ -364,6 +385,101 @@ def _safe_runner_env() -> dict[str, str]:
         "LANG": os.getenv("LANG", "C.UTF-8"),
         "LC_ALL": os.getenv("LC_ALL", "C.UTF-8"),
         "NO_COLOR": "1",
+    }
+
+
+async def run_area_risk_codex_analysis(
+    prompt: str,
+    *,
+    max_zones: int,
+) -> dict[str, Any]:
+    """Analyze bounded public area-risk evidence through ChatGPT-authenticated Codex."""
+    if not settings.codex_agent_enabled or not settings.area_risk_codex_fallback_enabled:
+        raise ExplorerCodexRuntimeError("runtime_unavailable")
+    execution_policy_status()
+    runner_path = _area_risk_runner_path()
+    if not runner_path.is_file():
+        raise ExplorerCodexRuntimeError("runtime_unavailable")
+    auth_fingerprint = _codex_auth_file_fingerprint()
+    if auth_fingerprint is None:
+        _mark_codex_auth_unavailable()
+        raise ExplorerCodexRuntimeError("codex_auth_unavailable")
+    if await _cached_codex_login_method(auth_fingerprint) != "chatgpt":
+        _mark_codex_auth_unavailable()
+        raise ExplorerCodexRuntimeError("codex_auth_unavailable")
+
+    payload = {
+        "prompt": str(prompt or "").strip()[:48000],
+        "maxZones": max(1, min(int(max_zones or 1), 6)),
+        "model": str(settings.area_risk_codex_model or settings.codex_agent_model or "gpt-5.6-sol").strip(),
+        "reasoningEffort": str(settings.area_risk_codex_reasoning_effort or "low").strip(),
+        "workspace": str(_workspace_for_area_risk()),
+        "codexHome": _codex_home(),
+        "codexPath": str(settings.codex_cli_path or "").strip() or None,
+    }
+    if not payload["prompt"]:
+        raise ValueError("Area-risk Codex prompt is required")
+
+    process: asyncio.subprocess.Process | None = None
+    try:
+        async with _area_risk_codex_semaphore:
+            process = await asyncio.create_subprocess_exec(
+                _node_binary(),
+                str(runner_path),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=_safe_runner_env(),
+                cwd=str(_project_root()),
+                start_new_session=True,
+            )
+            timeout_seconds = max(
+                30,
+                min(int(settings.area_risk_codex_timeout or 180), 600),
+            )
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
+                timeout=timeout_seconds,
+            )
+    except asyncio.TimeoutError as exc:
+        if process is not None:
+            await _terminate_process(process, process_group=True)
+        raise ExplorerCodexRuntimeError("runtime_timeout") from exc
+    except asyncio.CancelledError:
+        if process is not None:
+            await _terminate_process(process, process_group=True)
+        raise
+    except ExplorerCodexRuntimeError:
+        raise
+    except Exception as exc:
+        code = _runtime_failure_code(exc)
+        raise ExplorerCodexRuntimeError(code) from exc
+
+    if (
+        process is None
+        or process.returncode != 0
+        or len(stdout) > _MAX_AREA_RISK_RUNNER_OUTPUT_BYTES
+        or len(stderr) > _MAX_RUNNER_STDERR_CHARS
+    ):
+        safe_stderr = stderr[:_MAX_RUNNER_STDERR_CHARS].decode("utf-8", errors="replace")
+        code = _runtime_failure_code(
+            RuntimeError("Area-risk Codex runtime exited without a valid result"),
+            safe_stderr,
+        )
+        if code == "codex_auth_unavailable":
+            _mark_codex_auth_unavailable()
+        raise ExplorerCodexRuntimeError(code)
+    try:
+        result = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExplorerCodexRuntimeError("runtime_unavailable") from exc
+    if not isinstance(result, dict) or not isinstance(result.get("zones"), list):
+        raise ExplorerCodexRuntimeError("runtime_unavailable")
+    _clear_codex_auth_failure()
+    return {
+        "zones": result["zones"][: payload["maxZones"]],
+        "notes": str(result.get("notes") or "").strip()[:1000],
+        "model": str(result.get("model") or payload["model"]).strip()[:120],
     }
 
 
