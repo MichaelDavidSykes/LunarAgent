@@ -133,7 +133,7 @@ test("citations require completed research or exact tool-result URL evidence", (
   assert.match(runner, /collectCitationEvidenceUrls/);
   assert.match(runner, /collectGraphCitationEvidence/);
   assert.match(runner, /citationEvidenceUrls/);
-  assert.match(runner, /item\.tool === "get_graph_report"/);
+  assert.match(runner, /"get_graph_report", "get_graph_entity_neighborhood"/);
   assert.match(runner, /graphCitationEvidence: \[\.\.\.graphCitationEvidence\.values\(\)\]/);
   assert.match(runner, /sourcesBoundToToolEvidence/);
   assert.match(runner, /sourcesAddedFromInspectedGraphReports/);
@@ -144,18 +144,19 @@ test("interactive entities require exact current-turn curated graph evidence", (
   assert.match(runner, /collectGraphEntityEvidence/);
   assert.match(
     runner,
-    /\["search_intelligence_graph", "get_graph_report"\]\.includes\(item\.tool\)/,
+    /"search_intelligence_graph"[\s\S]*"get_graph_report"[\s\S]*"get_graph_entity_neighborhood"/,
   );
   assert.match(runner, /graphEntityEvidence: \[\.\.\.graphEntityEvidence\.values\(\)\]/);
   assert.match(runner, /entitiesRemovedWithoutEvidence/);
   assert.match(
     runner,
-    /exact graph document id, label, and type appeared in this turn's completed search_intelligence_graph or get_graph_report result/,
+    /exact graph document id, label, and type appeared in this turn's completed search_intelligence_graph, get_graph_report, or get_graph_entity_neighborhood result/,
   );
 });
 
 test("graph research has a bounded non-redundant evidence budget", () => {
   assert.match(runner, /at most use four intelligence-graph searches/);
+  assert.match(runner, /four entity-neighborhood reads/);
   assert.match(runner, /Do not repeat overlapping searches or synonym-only variants/);
   assert.match(runner, /Transient read-only HTTP retry is handled inside the tool bridge/);
   assert.match(mcpRuntime, /claimGraphToolBudget/);

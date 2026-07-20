@@ -350,6 +350,41 @@ test("graph citation evidence rejects injected titles, unsafe links, and generic
   }]);
 });
 
+test("entity neighborhood evidence admits only its bounded direct reports", () => {
+  const evidence = {
+    neighborhood: {
+      reports: [
+        {
+          name: "Neighborhood report",
+          sourceName: "Example Source",
+          modified: "2026-07-20T10:00:00Z",
+          sourceLink: "https://example.test/neighborhood#section",
+        },
+        {
+          name: "Unsafe local report",
+          sourceLink: "http://127.0.0.1/private",
+        },
+      ],
+    },
+    reports: [
+      {
+        name: "Unrelated search result",
+        sourceLink: "https://attacker.test/search-result",
+      },
+    ],
+  };
+
+  assert.deepEqual(collectGraphCitationEvidence(evidence), [
+    {
+      title: "Neighborhood report",
+      url: "https://example.test/neighborhood",
+      sourceName: "Example Source",
+      publishedAt: "2026-07-20T10:00:00Z",
+      snippet: null,
+    },
+  ]);
+});
+
 test("completed report evidence restores exact citations omitted by structured output", () => {
   const evidence = {
     title: "Verified intelligence report",
@@ -539,6 +574,50 @@ test("graph entity evidence collection accepts only canonical records in explici
       id: "nodes_vertex_collection/entity-1",
       label: "Example Group",
       type: "identity",
+    },
+  ]);
+});
+
+test("entity neighborhood relationships provide exact interactive entity evidence", () => {
+  const evidence = {
+    neighborhood: {
+      entity: {
+        id: "nodes_vertex_collection/entity-1",
+        type: "identity",
+        label: "Example Group",
+      },
+      relationships: [
+        {
+          relationshipType: "uses",
+          source: {
+            id: "nodes_vertex_collection/entity-1",
+            type: "identity",
+            label: "Example Group",
+          },
+          target: {
+            id: "nodes_vertex_collection/tool-1",
+            type: "tool",
+            label: "Example Tool",
+          },
+        },
+      ],
+    },
+    metadata: {
+      id: "nodes_vertex_collection/not-evidence",
+      label: "Arbitrary metadata object",
+    },
+  };
+
+  assert.deepEqual(collectGraphEntityEvidence(evidence), [
+    {
+      id: "nodes_vertex_collection/entity-1",
+      label: "Example Group",
+      type: "identity",
+    },
+    {
+      id: "nodes_vertex_collection/tool-1",
+      label: "Example Tool",
+      type: "tool",
     },
   ]);
 });
