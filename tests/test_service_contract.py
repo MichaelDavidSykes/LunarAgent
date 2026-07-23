@@ -1883,6 +1883,72 @@ def test_area_risk_normalization_enforces_aoi_and_verified_sources():
     assert [zone["label"] for zone in payload["zones"]] == ["Inside AOI"]
 
 
+def test_area_risk_normalization_preserves_verified_named_zone_for_downstream_geocoding():
+    payload = service_module.normalize_safe_route_area_risk_payload(
+        {
+            "zones": [
+                {
+                    "label": "La Pampa sector",
+                    "lat": None,
+                    "lon": None,
+                    "radius_m": 900,
+                    "evidence_urls": ["https://police.example.test/la-pampa"],
+                },
+                {
+                    "label": "Partial coordinate",
+                    "lat": -20.25,
+                    "lon": None,
+                    "radius_m": 900,
+                    "evidence_urls": ["https://police.example.test/la-pampa"],
+                },
+            ]
+        },
+        max_zones=4,
+        aoi={
+            "bounds": {
+                "minLat": -20.323637,
+                "minLon": -70.130441,
+                "maxLat": -20.108042,
+                "maxLon": -69.900693,
+            }
+        },
+        verified_source_urls={"https://police.example.test/la-pampa"},
+    )
+
+    assert [zone["label"] for zone in payload["zones"]] == ["La Pampa sector"]
+    assert payload["zones"][0]["lat"] is None
+    assert payload["zones"][0]["lon"] is None
+    assert payload["zones"][0]["coordinates"] == []
+    assert payload["zones"][0]["radius_m"] == 900.0
+
+
+def test_area_risk_normalization_does_not_defer_unverified_named_zone_geocoding():
+    payload = service_module.normalize_safe_route_area_risk_payload(
+        {
+            "zones": [
+                {
+                    "label": "Unverified locality",
+                    "lat": None,
+                    "lon": None,
+                    "radius_m": 900,
+                    "evidence_urls": ["https://example.test/unverified"],
+                }
+            ]
+        },
+        max_zones=4,
+        aoi={
+            "bounds": {
+                "minLat": -20.323637,
+                "minLon": -70.130441,
+                "maxLat": -20.108042,
+                "maxLon": -69.900693,
+            }
+        },
+    )
+
+    assert payload["zones"] == []
+
+
 def test_area_risk_payload_normalization_accepts_hard_radius_and_geometry_boundary():
     payload = service_module.normalize_safe_route_area_risk_payload(
         {
@@ -2208,6 +2274,60 @@ def test_area_risk_codex_web_sources_require_completed_search_marker(monkeypatch
 
     assert [zone["label"] for zone in result["zones"]] == ["Brixton"]
     assert result["zones"][0]["evidence_urls"] == ["https://police.example.test/brixton"]
+
+
+def test_area_risk_codex_web_result_can_defer_verified_named_zone_geocoding(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", False)
+
+    async def fail_api_analysis(*_args, **_kwargs):
+        raise RuntimeError("Responses API quota unavailable")
+
+    async def codex_web_analysis(*_args, **_kwargs):
+        return {
+            "model": "gpt-5.6-sol",
+            "webSearchCompleted": True,
+            "verifiedSourceUrls": ["https://police.example.test/la-pampa"],
+            "notes": "Named source-backed locality needs downstream geocoding.",
+            "zones": [
+                {
+                    "label": "La Pampa sector",
+                    "severity": "high",
+                    "risk_score": 78,
+                    "confidence": "source-backed",
+                    "lat": None,
+                    "lon": None,
+                    "radius_m": 900,
+                    "coordinates": [],
+                    "display_color": "red",
+                    "icon": "warning",
+                    "notes": "Recurring violent-crime reporting names this locality.",
+                    "evidence_urls": ["https://police.example.test/la-pampa"],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(service_module, "run_openai_responses_analysis", fail_api_analysis)
+    monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", codex_web_analysis)
+
+    result = asyncio.run(
+        service_module.research_safe_route_area_risk(
+            aoi={
+                "bounds": {
+                    "minLat": -20.323637,
+                    "minLon": -70.130441,
+                    "maxLat": -20.108042,
+                    "maxLon": -69.900693,
+                }
+            },
+            evidence=[],
+            max_zones=3,
+        )
+    )
+
+    assert [zone["label"] for zone in result["zones"]] == ["La Pampa sector"]
+    assert result["zones"][0]["lat"] is None
+    assert result["zones"][0]["lon"] is None
+    assert result["zones"][0]["evidence_urls"] == ["https://police.example.test/la-pampa"]
 
 
 def test_area_risk_api_and_codex_failure_is_retryable_http_failure(monkeypatch):
