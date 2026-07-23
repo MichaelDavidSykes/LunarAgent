@@ -2772,7 +2772,14 @@ def normalize_safe_route_area_risk_payload(
         if lat is None and lon is None and len(coordinates) >= 3:
             lat = sum(point["lat"] for point in coordinates) / len(coordinates)
             lon = sum(point["lon"] for point in coordinates) / len(coordinates)
-        if aoi_bounds and (lat is None or lon is None or not _point_in_safe_route_aoi(lat, lon, aoi_bounds)):
+        if aoi_bounds and lat is None and lon is None and verified_source_urls is None:
+            continue
+        if (
+            aoi_bounds
+            and lat is not None
+            and lon is not None
+            and not _point_in_safe_route_aoi(lat, lon, aoi_bounds)
+        ):
             continue
         if aoi_bounds and coordinates and (
             len(coordinates) < 3
