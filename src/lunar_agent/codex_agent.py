@@ -8,6 +8,7 @@ import os
 import secrets
 import signal
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -288,7 +289,9 @@ async def _terminate_process(
 
     def send_signal(sig: signal.Signals) -> None:
         try:
-            if process_group:
+            if process_group and os.name == "nt":
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+            elif process_group:
                 os.killpg(process.pid, sig)
             else:
                 process.send_signal(sig)
@@ -299,13 +302,28 @@ async def _terminate_process(
     try:
         await asyncio.wait_for(process.wait(), timeout=5)
     except asyncio.TimeoutError:
-        send_signal(signal.SIGKILL)
+        if process_group and os.name == "nt":
+            tree_killer = await asyncio.create_subprocess_exec(
+                shutil.which("taskkill") or "taskkill",
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                env=_safe_runner_env(),
+            )
+            await tree_killer.wait()
+        else:
+            send_signal(signal.SIGKILL)
+        if process.returncode is None:
+            process.kill()
         await process.wait()
     else:
         # The process-group leader can exit before an MCP or Codex child that
         # ignored SIGTERM. A final group signal closes that race without
         # affecting the Agent because every runner is a dedicated session.
-        if process_group:
+        if process_group and os.name != "nt":
             send_signal(signal.SIGKILL)
 
 
@@ -337,6 +355,12 @@ def _mcp_server_path() -> Path:
 def _node_binary() -> str:
     configured = str(settings.codex_node_binary or "node").strip()
     return shutil.which(configured) or configured
+
+
+def _process_group_options() -> dict[str, Any]:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
 
 
 def _codex_home() -> str:
@@ -378,7 +402,7 @@ def _workspace_for_area_risk() -> Path:
 def _safe_runner_env() -> dict[str, str]:
     path = os.getenv("PATH", "/usr/local/bin:/usr/bin:/bin")
     home = os.getenv("HOME", str(Path.home()))
-    return {
+    environment = {
         "PATH": path,
         "HOME": home,
         "CODEX_HOME": _codex_home(),
@@ -386,6 +410,13 @@ def _safe_runner_env() -> dict[str, str]:
         "LC_ALL": os.getenv("LC_ALL", "C.UTF-8"),
         "NO_COLOR": "1",
     }
+    # Node's Windows crypto initialization requires SystemRoot. Keep this
+    # platform variable narrowly allowlisted without inheriting service secrets.
+    if os.name == "nt":
+        system_root = str(os.getenv("SystemRoot") or os.getenv("WINDIR") or "").strip()
+        if system_root:
+            environment["SystemRoot"] = system_root
+    return environment
 
 
 async def run_area_risk_codex_analysis(
@@ -437,7 +468,7 @@ async def run_area_risk_codex_analysis(
                 stderr=asyncio.subprocess.PIPE,
                 env=_safe_runner_env(),
                 cwd=str(_project_root()),
-                start_new_session=True,
+                **_process_group_options(),
             )
             timeout_seconds = max(
                 30,
@@ -830,7 +861,7 @@ async def run_explorer_codex_turn(
             env=_safe_runner_env(),
             cwd=str(_project_root()),
             limit=_MAX_RUNNER_LINE_BYTES + 1,
-            start_new_session=True,
+            **_process_group_options(),
         )
     except Exception as exc:
         code = _runtime_failure_code(exc)

@@ -367,6 +367,7 @@ async function main() {
   const abort = () => abortController.abort();
   process.once("SIGTERM", abort);
   process.once("SIGINT", abort);
+  if (process.platform === "win32") process.once("SIGBREAK", abort);
   const streamed = await thread.runStreamed(buildPrompt(input), {
     outputSchema: outputSchema(),
     signal: abortController.signal,

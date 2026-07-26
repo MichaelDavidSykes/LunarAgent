@@ -46,6 +46,7 @@ process.stdin.once("end", shutdownWithRunner);
 process.stdin.once("close", shutdownWithRunner);
 process.once("SIGTERM", shutdownWithRunner);
 process.once("SIGINT", shutdownWithRunner);
+if (process.platform === "win32") process.once("SIGBREAK", shutdownWithRunner);
 
 const server = new McpServer({
   name: "lunarchain-intelligence-graph",
