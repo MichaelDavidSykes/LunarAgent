@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import time
 from pathlib import Path
 
@@ -300,6 +301,21 @@ def test_project_root_uses_deployed_application_root(tmp_path, monkeypatch):
 
     assert codex_module._project_root() == tmp_path.resolve()
     assert codex_module._runner_path() == runtime / "runner.mjs"
+
+
+def test_safe_runner_env_keeps_windows_runtime_root_without_service_secrets(monkeypatch):
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
+    monkeypatch.setenv("LUNAR_AGENT_BACKEND_SHARED_TOKEN", "must-not-leak")
+
+    environment = codex_module._safe_runner_env()
+
+    if os.name == "nt":
+        assert environment["SystemRoot"] == r"C:\Windows"
+    else:
+        assert "SystemRoot" not in environment
+    assert "OPENAI_API_KEY" not in environment
+    assert "LUNAR_AGENT_BACKEND_SHARED_TOKEN" not in environment
 
 
 def test_runtime_streams_events_and_keeps_service_secrets_out_of_child_env(
@@ -982,7 +998,8 @@ def test_runtime_cancellation_terminates_node_process(tmp_path, monkeypatch):
         f"""
 import fs from "node:fs";
 fs.writeFileSync({str(ready)!r}, "ready");
-process.once("SIGTERM", () => {{
+const shutdownSignal = process.platform === "win32" ? "SIGBREAK" : "SIGTERM";
+process.once(shutdownSignal, () => {{
   fs.writeFileSync({str(stopped)!r}, "stopped");
   process.exit(0);
 }});
@@ -1031,16 +1048,24 @@ import fs from "node:fs";
 import {{ spawn }} from "node:child_process";
 const childScript = `
   const fs = require("node:fs");
-  process.once("SIGTERM", () => {{
-    fs.writeFileSync({str(child_stopped)!r}, "stopped");
+  const shutdownSignal = process.platform === "win32" ? "SIGBREAK" : "SIGTERM";
+  process.once(shutdownSignal, () => {{
+    fs.writeFileSync(process.argv[1], "stopped");
+    process.exit(0);
   }});
-  fs.writeFileSync({str(ready)!r}, String(process.pid));
+  fs.writeFileSync(process.argv[2], String(process.pid));
   setInterval(() => {{}}, 1000);
 `;
-const child = spawn(process.execPath, ["-e", childScript], {{
+const child = spawn(process.execPath, [
+  "-e",
+  childScript,
+  {str(child_stopped)!r},
+  {str(ready)!r},
+], {{
   stdio: "ignore",
 }});
-process.once("SIGTERM", () => {{
+const shutdownSignal = process.platform === "win32" ? "SIGBREAK" : "SIGTERM";
+process.once(shutdownSignal, () => {{
   fs.writeFileSync({str(runner_stopped)!r}, "stopped");
   setTimeout(() => process.exit(0), 100);
 }});
@@ -1091,6 +1116,10 @@ setInterval(() => {{}}, 1000);
             os.kill(child_pid, 0)
         except ProcessLookupError:
             return False
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) == 87:
+                return False
+            raise
         proc_stat = Path(f"/proc/{child_pid}/stat")
         if proc_stat.is_file():
             try:
@@ -1104,5 +1133,12 @@ setInterval(() => {{}}, 1000);
             break
         time.sleep(0.02)
     else:
-        os.kill(child_pid, signal.SIGKILL)
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(child_pid), "/T", "/F"],
+                check=False,
+                capture_output=True,
+            )
+        else:
+            os.kill(child_pid, signal.SIGKILL)
         pytest.fail("Runner child survived cancellation")
