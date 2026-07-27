@@ -30,6 +30,7 @@ Environment=LUNAR_AGENT_CODEX_MODEL=gpt-5.6-sol
 Environment=LUNAR_AGENT_CODEX_REASONING_EFFORT=medium
 Environment=LUNAR_AGENT_CODEX_TIMEOUT=900
 Environment=LUNAR_AGENT_CODEX_MAX_CONCURRENT_REQUESTS=2
+Environment=LUNAR_AGENT_CODEX_WORKSPACE_ROOT=/tmp/lunar-agent-codex-workspaces
 Environment=CODEX_HOME=/codex-auth
 ExecStartPre=-/usr/bin/docker rm -f lunar-agent
 ExecStart=/usr/bin/docker run --rm \
@@ -59,6 +60,7 @@ ExecStart=/usr/bin/docker run --rm \
   --env LUNAR_AGENT_CODEX_REASONING_EFFORT \
   --env LUNAR_AGENT_CODEX_TIMEOUT \
   --env LUNAR_AGENT_CODEX_MAX_CONCURRENT_REQUESTS \
+  --env LUNAR_AGENT_CODEX_WORKSPACE_ROOT \
   --env CODEX_HOME \
   --volume /etc/lunar-agent/codex:/codex-auth:rw \
   --publish 127.0.0.1:8310:8310 \
@@ -69,7 +71,7 @@ ExecStart=/usr/bin/docker run --rm \
   --memory 1536m \
   --cpus 4 \
   --pids-limit 256 \
-  --tmpfs /tmp:rw,exec,nosuid,size=512m \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=512m \
   lunar-agent:latest
 ExecStop=/usr/bin/docker stop lunar-agent
 Restart=always

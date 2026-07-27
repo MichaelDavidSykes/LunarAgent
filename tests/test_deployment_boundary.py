@@ -2,14 +2,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_agent_container_has_no_host_command_surface() -> None:
-    unit = (REPOSITORY_ROOT / "deploy" / "lunar-agent.service").read_text(
-        encoding="utf-8"
-    )
+@pytest.mark.parametrize(
+    "unit_path",
+    (
+        REPOSITORY_ROOT / "deploy" / "lunar-agent.service",
+        REPOSITORY_ROOT / "deploy" / "systemd" / "lunar-agent.service",
+    ),
+)
+def test_agent_container_has_no_host_command_surface(unit_path: Path) -> None:
+    unit = unit_path.read_text(encoding="utf-8")
 
     assert (
         "Environment=LUNAR_AGENT_CODEX_WORKSPACE_ROOT="
