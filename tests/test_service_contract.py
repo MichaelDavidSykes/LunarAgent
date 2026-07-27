@@ -1797,6 +1797,43 @@ def test_area_risk_payload_normalization_accepts_title_as_label():
     assert payload["zones"][0]["label"] == "Nyanga"
 
 
+def test_area_risk_payload_normalization_rejects_generic_post_ai_label_fragments():
+    source_url = "https://example.test/local-risk-report"
+    payload = service_module.normalize_safe_route_area_risk_payload(
+        {
+            "zones": [
+                {
+                    "label": label,
+                    "severity": "high",
+                    "risk_score": 80,
+                    "confidence": "source-backed",
+                    "lat": -33.96,
+                    "lon": 18.58,
+                    "radius_m": 900,
+                    "evidence_urls": [source_url],
+                }
+                for label in (
+                    "Murder",
+                    "Neighbourhood",
+                    "Seven",
+                    "News",
+                    "June",
+                    "Reported",
+                    "Third",
+                    "Man",
+                    "123",
+                    "Tafelsig",
+                    "Lost City",
+                )
+            ]
+        },
+        max_zones=20,
+        verified_source_urls={source_url},
+    )
+
+    assert [zone["label"] for zone in payload["zones"]] == ["Tafelsig", "Lost City"]
+
+
 def test_area_risk_payload_normalization_drops_sourceless_and_unsafe_url_zones():
     payload = service_module.normalize_safe_route_area_risk_payload(
         {

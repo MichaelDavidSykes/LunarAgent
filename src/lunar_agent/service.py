@@ -2529,6 +2529,83 @@ def _point_in_safe_route_aoi(lat: float, lon: float, bounds: dict[str, float]) -
     )
 
 
+_SAFE_ROUTE_GENERIC_AREA_LABELS = frozenset(
+    {
+        "alert",
+        "area",
+        "attack",
+        "crime",
+        "crime hotspot",
+        "danger",
+        "district",
+        "eight",
+        "eleven",
+        "five",
+        "four",
+        "high risk area",
+        "incident",
+        "location",
+        "man",
+        "murder",
+        "neighborhood",
+        "neighbourhood",
+        "news",
+        "nine",
+        "one",
+        "province",
+        "provincial",
+        "region",
+        "reported",
+        "risk",
+        "risk area",
+        "robbery",
+        "seven",
+        "shooting",
+        "six",
+        "ten",
+        "the",
+        "third",
+        "threat",
+        "three",
+        "twelve",
+        "two",
+        "unknown",
+        "violence",
+        "warning",
+        "zone",
+    }
+)
+_SAFE_ROUTE_GENERIC_MONTH_LABELS = frozenset(
+    {
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    }
+)
+
+
+def _is_specific_safe_route_area_label(value: Any) -> bool:
+    """Reject generic model fragments after AI analysis without inventing a locality."""
+    label = _trim_text(value, 120)
+    normalized = " ".join(re.findall(r"[^\W_]+", label.casefold(), flags=re.UNICODE))
+    if not normalized or normalized.isdigit():
+        return False
+    if normalized in _SAFE_ROUTE_GENERIC_AREA_LABELS:
+        return False
+    if normalized in _SAFE_ROUTE_GENERIC_MONTH_LABELS:
+        return False
+    return any(character.isalpha() for character in normalized)
+
+
 def normalize_safe_route_area_risk_payload(
     payload: dict[str, Any],
     max_zones: int,
@@ -2549,7 +2626,7 @@ def normalize_safe_route_area_risk_payload(
         if not isinstance(raw_zone, dict):
             continue
         label = _trim_text(raw_zone.get("label") or raw_zone.get("name") or raw_zone.get("title"), 120)
-        if not label:
+        if not _is_specific_safe_route_area_label(label):
             continue
         severity = str(raw_zone.get("severity") or "medium").strip().lower()
         if severity not in {"low", "medium", "high", "critical"}:
