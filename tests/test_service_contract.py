@@ -1996,75 +1996,46 @@ def test_area_risk_prompts_enforce_city_scale_hard_stop():
     assert "never shrink a city-scale claim" in web_prompt
 
 
-def test_area_risk_evidence_fallback_extracts_source_backed_localities():
-    zones = service_module.fallback_safe_route_area_risk_candidates(
-        aoi={
-            "labelContext": {
-                "place": "Cape Town",
-                "country": "South Africa",
-                "display": "Cape Town, Western Cape, South Africa",
-            },
-            "countryHints": ["South Africa"],
-        },
-        evidence=[
-            {
-                "title": "Crime monitoring highlights Nyanga and Delft robbery hotspots",
-                "url": "https://example.test/nyanga-delft",
-                "snippet": "Public reports mention Nyanga and Delft robbery and road disruption.",
-            },
-            {
-                "title": "Khayelitsha protest disruption affects major routes",
-                "url": "https://example.test/khayelitsha",
-                "snippet": "Reports describe protest mobilisation and violence in Khayelitsha.",
-            },
-        ],
-        max_zones=6,
+def test_area_risk_regex_extractor_is_not_available():
+    assert not hasattr(service_module, "fallback_safe_route_area_risk_candidates")
+
+
+def test_area_risk_account_mode_uses_ai_before_any_api_path(monkeypatch):
+    monkeypatch.setattr(
+        service_module.settings,
+        "area_risk_provider_mode",
+        "chatgpt-account",
     )
+    monkeypatch.setattr(service_module.settings, "area_risk_codex_model", "gpt-5.6-sol")
 
-    labels = {zone["label"] for zone in zones}
-    assert {"Nyanga", "Delft", "Khayelitsha"}.issubset(labels)
-    assert "Cape Town" not in labels
-    assert all(zone["evidence_urls"] for zone in zones)
+    async def fail_if_api_called(*_args, **_kwargs):  # pragma: no cover - regression only
+        raise AssertionError("Account mode must not invoke an API-billed provider")
 
+    async def account_analysis(*_args, **_kwargs):
+        return {
+            "model": "gpt-5.6-sol",
+            "notes": "AI rejected broad article wording and found the named locality.",
+            "zones": [
+                {
+                    "label": "Nyanga",
+                    "severity": "high",
+                    "risk_score": 78,
+                    "confidence": "source-backed",
+                    "lat": -33.992,
+                    "lon": 18.585,
+                    "radius_m": 1000,
+                    "coordinates": [],
+                    "display_color": "red",
+                    "icon": "warning",
+                    "notes": "Recurring robbery reports affect route safety.",
+                    "evidence_urls": ["https://example.test/nyanga"],
+                }
+            ],
+        }
 
-def test_area_risk_evidence_fallback_ignores_unsafe_urls():
-    zones = service_module.fallback_safe_route_area_risk_candidates(
-        aoi={
-            "labelContext": {
-                "place": "Cape Town",
-                "country": "South Africa",
-                "display": "Cape Town, Western Cape, South Africa",
-            }
-        },
-        evidence=[
-            {
-                "title": "Nyanga robbery hotspot",
-                "url": "http://169.254.169.254/latest",
-                "snippet": "Nyanga robbery and violence reports affect route safety.",
-            },
-            {
-                "title": "Delft robbery hotspot",
-                "url": "https://example.test/delft",
-                "snippet": "Delft robbery and violence reports affect route safety.",
-            },
-        ],
-        max_zones=6,
-    )
-
-    labels = {zone["label"] for zone in zones}
-    assert "Nyanga" not in labels
-    assert "Delft" in labels
-    assert all(url.startswith("https://example.test/") for zone in zones for url in zone["evidence_urls"])
-
-
-def test_area_risk_evidence_failure_uses_deterministic_fallback(monkeypatch):
-    monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", False)
-    monkeypatch.setattr(service_module.settings, "area_risk_model", "gpt-5-mini")
-
-    async def fail_analysis(*_args, **_kwargs):
-        raise RuntimeError("Responses API returned no text")
-
-    monkeypatch.setattr(service_module, "run_openai_responses_analysis", fail_analysis)
+    monkeypatch.setattr(service_module, "run_openai_web_research", fail_if_api_called)
+    monkeypatch.setattr(service_module, "run_openai_responses_analysis", fail_if_api_called)
+    monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", account_analysis)
 
     result = asyncio.run(
         service_module.research_safe_route_area_risk(
@@ -2077,21 +2048,22 @@ def test_area_risk_evidence_failure_uses_deterministic_fallback(monkeypatch):
             },
             evidence=[
                 {
-                    "title": "Nyanga robbery hotspot",
+                    "title": "Murder and neighbourhood updates",
                     "url": "https://example.test/nyanga",
-                    "snippet": "Nyanga robbery and violence reports affect route safety.",
+                    "snippet": "Reporting identifies the affected locality as Nyanga.",
                 }
             ],
             max_zones=3,
         )
     )
 
-    assert result["model"] == "gpt-5-mini"
+    assert result["model"] == "chatgpt-account:gpt-5.6-sol"
     assert result["zones"][0]["label"] == "Nyanga"
-    assert result["notes"] == "Used bounded public evidence fallback for named locality candidates."
+    assert result["notes"] == "AI rejected broad article wording and found the named locality."
 
 
 def test_area_risk_empty_web_result_does_not_double_call_model(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_provider_mode", "openai-api")
     monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", True)
     monkeypatch.setattr(service_module.settings, "area_risk_fallback_on_empty_web", False)
     monkeypatch.setattr(service_module.settings, "area_risk_model", "gpt-5.4-mini")
@@ -2121,6 +2093,7 @@ def test_area_risk_empty_web_result_does_not_double_call_model(monkeypatch):
 
 
 def test_area_risk_web_error_fallback_hides_provider_detail(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_provider_mode", "openai-api")
     monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", True)
     monkeypatch.setattr(service_module.settings, "area_risk_fallback_on_web_error", True)
     monkeypatch.setattr(service_module.settings, "area_risk_model", "gpt-5.4-mini")
@@ -2145,18 +2118,17 @@ def test_area_risk_web_error_fallback_hides_provider_detail(monkeypatch):
     assert result == {
         "zones": [],
         "model": "gpt-5.4-mini",
-        "notes": "Dynamic web research failed; fell back to supplied evidence only.",
+        "notes": "OpenAI API web research failed; used API evidence analysis.",
     }
     assert "provider-secret-token" not in json.dumps(result)
 
 
-def test_area_risk_api_quota_failure_uses_chatgpt_codex_account(monkeypatch):
-    monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", False)
-    monkeypatch.setattr(service_module.settings, "area_risk_model", "gpt-5.1")
+def test_area_risk_account_mode_uses_chatgpt_account_directly(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_provider_mode", "chatgpt-account")
     monkeypatch.setattr(service_module.settings, "area_risk_codex_model", "gpt-5.6-sol")
 
-    async def fail_api_analysis(*_args, **_kwargs):
-        raise RuntimeError("Responses API returned HTTP 429: insufficient_quota")
+    async def fail_if_api_called(*_args, **_kwargs):  # pragma: no cover - regression only
+        raise AssertionError("Account mode must not invoke API billing")
 
     captured = {}
 
@@ -2185,7 +2157,8 @@ def test_area_risk_api_quota_failure_uses_chatgpt_codex_account(monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(service_module, "run_openai_responses_analysis", fail_api_analysis)
+    monkeypatch.setattr(service_module, "run_openai_web_research", fail_if_api_called)
+    monkeypatch.setattr(service_module, "run_openai_responses_analysis", fail_if_api_called)
     monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", codex_account_analysis)
 
     result = asyncio.run(
@@ -2214,7 +2187,7 @@ def test_area_risk_api_quota_failure_uses_chatgpt_codex_account(monkeypatch):
         )
     )
 
-    assert result["model"] == "codex-account:gpt-5.6-sol"
+    assert result["model"] == "chatgpt-account:gpt-5.6-sol"
     assert [zone["label"] for zone in result["zones"]] == ["Brixton"]
     assert result["zones"][0]["evidence_urls"] == ["https://example.test/london-risk"]
     assert result["notes"] == "Bounded evidence analysis completed."
@@ -2225,10 +2198,7 @@ def test_area_risk_api_quota_failure_uses_chatgpt_codex_account(monkeypatch):
 
 
 def test_area_risk_codex_web_sources_require_completed_search_marker(monkeypatch):
-    monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", False)
-
-    async def fail_api_analysis(*_args, **_kwargs):
-        raise RuntimeError("Responses API quota unavailable")
+    monkeypatch.setattr(service_module.settings, "area_risk_provider_mode", "chatgpt-account")
 
     async def codex_web_analysis(*_args, **_kwargs):
         return {
@@ -2254,7 +2224,6 @@ def test_area_risk_codex_web_sources_require_completed_search_marker(monkeypatch
             ],
         }
 
-    monkeypatch.setattr(service_module, "run_openai_responses_analysis", fail_api_analysis)
     monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", codex_web_analysis)
 
     result = asyncio.run(
@@ -2277,10 +2246,7 @@ def test_area_risk_codex_web_sources_require_completed_search_marker(monkeypatch
 
 
 def test_area_risk_codex_web_result_can_defer_verified_named_zone_geocoding(monkeypatch):
-    monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", False)
-
-    async def fail_api_analysis(*_args, **_kwargs):
-        raise RuntimeError("Responses API quota unavailable")
+    monkeypatch.setattr(service_module.settings, "area_risk_provider_mode", "chatgpt-account")
 
     async def codex_web_analysis(*_args, **_kwargs):
         return {
@@ -2306,7 +2272,6 @@ def test_area_risk_codex_web_result_can_defer_verified_named_zone_geocoding(monk
             ],
         }
 
-    monkeypatch.setattr(service_module, "run_openai_responses_analysis", fail_api_analysis)
     monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", codex_web_analysis)
 
     result = asyncio.run(
@@ -2330,19 +2295,58 @@ def test_area_risk_codex_web_result_can_defer_verified_named_zone_geocoding(monk
     assert result["zones"][0]["evidence_urls"] == ["https://police.example.test/la-pampa"]
 
 
-def test_area_risk_api_and_codex_failure_is_retryable_http_failure(monkeypatch):
+def test_area_risk_account_failure_never_falls_back_to_api_billing(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_provider_mode", "chatgpt-account")
+
+    async def fail_codex_analysis(*_args, **_kwargs):
+        raise RuntimeError("codex account usage limit with private detail")
+
+    async def fail_if_api_called(*_args, **_kwargs):  # pragma: no cover - regression only
+        raise AssertionError("Account failure must not trigger API billing")
+
+    monkeypatch.setattr(service_module, "run_openai_web_research", fail_if_api_called)
+    monkeypatch.setattr(service_module, "run_openai_responses_analysis", fail_if_api_called)
+    monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", fail_codex_analysis)
+
+    with pytest.raises(
+        RuntimeError,
+        match="ChatGPT-account area-risk analysis is temporarily unavailable",
+    ) as exc_info:
+        asyncio.run(
+            service_module.research_safe_route_area_risk(
+                aoi={
+                    "bounds": {
+                        "minLat": 51.40,
+                        "minLon": -0.30,
+                        "maxLat": 51.60,
+                        "maxLon": -0.05,
+                    }
+                },
+                evidence=[],
+                max_zones=3,
+            )
+        )
+
+    assert "private detail" not in str(exc_info.value)
+
+
+def test_area_risk_api_failure_never_spends_chatgpt_account(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_provider_mode", "openai-api")
     monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", False)
 
     async def fail_api_analysis(*_args, **_kwargs):
         raise RuntimeError("Responses API returned HTTP 429: provider-secret-token")
 
-    async def fail_codex_analysis(*_args, **_kwargs):
-        raise RuntimeError("codex account usage limit with private detail")
+    async def fail_if_codex_called(*_args, **_kwargs):  # pragma: no cover - regression only
+        raise AssertionError("API mode failure must not invoke the ChatGPT account")
 
     monkeypatch.setattr(service_module, "run_openai_responses_analysis", fail_api_analysis)
-    monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", fail_codex_analysis)
+    monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", fail_if_codex_called)
 
-    with pytest.raises(RuntimeError, match="Area-risk analysis providers are unavailable") as exc_info:
+    with pytest.raises(
+        RuntimeError,
+        match="OpenAI API area-risk analysis is temporarily unavailable",
+    ) as exc_info:
         asyncio.run(
             service_module.research_safe_route_area_risk(
                 aoi={
@@ -2359,17 +2363,17 @@ def test_area_risk_api_and_codex_failure_is_retryable_http_failure(monkeypatch):
         )
 
     assert "provider-secret-token" not in str(exc_info.value)
-    assert "private detail" not in str(exc_info.value)
 
 
 def test_area_risk_successful_empty_api_result_does_not_spend_codex_account(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_provider_mode", "openai-api")
     monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", False)
 
     async def empty_api_analysis(*_args, **_kwargs):
         return '{"zones":[],"notes":"No supported named localities."}'
 
     async def fail_if_codex_called(*_args, **_kwargs):  # pragma: no cover - regression only
-        raise AssertionError("Codex account fallback must only run after an API failure")
+        raise AssertionError("API mode must never invoke the ChatGPT account")
 
     monkeypatch.setattr(service_module, "run_openai_responses_analysis", empty_api_analysis)
     monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", fail_if_codex_called)

@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_AREA_RISK_PROVIDER_MODES = {"chatgpt-account", "openai-api"}
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -13,6 +14,19 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def _env_int(name: str, default: int) -> int:
     return int(os.getenv(name, str(default)))
+
+
+def _area_risk_provider_mode() -> str:
+    value = os.getenv(
+        "LUNAR_AGENT_AREA_RISK_PROVIDER_MODE",
+        "chatgpt-account",
+    ).strip().lower()
+    if value not in _AREA_RISK_PROVIDER_MODES:
+        raise ValueError(
+            "LUNAR_AGENT_AREA_RISK_PROVIDER_MODE must be "
+            "'chatgpt-account' or 'openai-api'"
+        )
+    return value
 
 
 class Settings(BaseSettings):
@@ -38,6 +52,7 @@ class Settings(BaseSettings):
     max_concurrent_requests: int = _env_int("LUNAR_AGENT_MAX_CONCURRENT_REQUESTS", 8)
     quota_requests_per_hour: int = _env_int("LUNAR_AGENT_QUOTA_REQUESTS_PER_HOUR", 60)
     quota_requests_per_day: int = _env_int("LUNAR_AGENT_QUOTA_REQUESTS_PER_DAY", 300)
+    area_risk_provider_mode: str = _area_risk_provider_mode()
     area_risk_web_research_enabled: bool = _env_bool("LUNAR_AGENT_AREA_RISK_WEB_RESEARCH_ENABLED", True)
     area_risk_model: str = os.getenv("LUNAR_AGENT_AREA_RISK_MODEL", "gpt-5.1")
     area_risk_search_context_size: str = os.getenv("LUNAR_AGENT_AREA_RISK_SEARCH_CONTEXT_SIZE", "medium")
@@ -47,9 +62,9 @@ class Settings(BaseSettings):
     area_risk_max_zones_per_request: int = _env_int("LUNAR_AGENT_AREA_RISK_MAX_ZONES", 6)
     area_risk_fallback_on_empty_web: bool = _env_bool("LUNAR_AGENT_AREA_RISK_FALLBACK_ON_EMPTY_WEB", False)
     area_risk_fallback_on_web_error: bool = _env_bool("LUNAR_AGENT_AREA_RISK_FALLBACK_ON_WEB_ERROR", True)
-    area_risk_codex_fallback_enabled: bool = _env_bool(
-        "LUNAR_AGENT_AREA_RISK_CODEX_FALLBACK_ENABLED",
-        True,
+    area_risk_account_enabled: bool = _env_bool(
+        "LUNAR_AGENT_AREA_RISK_ACCOUNT_ENABLED",
+        _env_bool("LUNAR_AGENT_AREA_RISK_CODEX_FALLBACK_ENABLED", True),
     )
     area_risk_codex_model: str = os.getenv(
         "LUNAR_AGENT_AREA_RISK_CODEX_MODEL",

@@ -104,10 +104,17 @@ async def health() -> dict:
     if not str(settings.shared_token or "").strip():
         raise HTTPException(status_code=503, detail="Agent authentication is unavailable")
     codex_auth = await codex_auth_status()
+    area_risk_provider_mode = settings.area_risk_provider_mode
+    area_risk_api_ready = bool(str(settings.openai_api_key or "").strip())
     area_risk_codex_ready = bool(
         settings.codex_agent_enabled
-        and settings.area_risk_codex_fallback_enabled
+        and settings.area_risk_account_enabled
         and codex_auth["configured"]
+    )
+    area_risk_provider_ready = (
+        area_risk_codex_ready
+        if area_risk_provider_mode == "chatgpt-account"
+        else area_risk_api_ready
     )
     if any(
         not str(value or "").strip()
@@ -115,7 +122,7 @@ async def health() -> dict:
             settings.backend_base_url,
             settings.backend_shared_token,
         )
-    ) or not (str(settings.openai_api_key or "").strip() or area_risk_codex_ready):
+    ) or not area_risk_provider_ready:
         raise HTTPException(status_code=503, detail="Agent dependencies are not configured")
     return {
         "status": "ok",
@@ -124,10 +131,17 @@ async def health() -> dict:
         "authConfigured": True,
         "dependenciesConfigured": True,
         "areaRiskAnalysis": {
-            "apiConfigured": bool(str(settings.openai_api_key or "").strip()),
-            "codexFallbackEnabled": bool(settings.area_risk_codex_fallback_enabled),
-            "codexFallbackReady": area_risk_codex_ready,
-            "codexModel": settings.area_risk_codex_model,
+            "providerMode": area_risk_provider_mode,
+            "billingMode": (
+                "chatgpt-plan"
+                if area_risk_provider_mode == "chatgpt-account"
+                else "openai-api"
+            ),
+            "providerReady": area_risk_provider_ready,
+            "apiConfigured": area_risk_api_ready,
+            "accountEnabled": bool(settings.area_risk_account_enabled),
+            "accountReady": area_risk_codex_ready,
+            "accountModel": settings.area_risk_codex_model,
         },
         "lunarAgent": {
             "enabled": bool(settings.codex_agent_enabled),

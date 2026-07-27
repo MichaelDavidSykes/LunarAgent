@@ -151,7 +151,7 @@ const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 if (process.env.OPENAI_API_KEY || process.env.LUNAR_AGENT_SHARED_TOKEN) process.exit(7);
 process.stdout.write(JSON.stringify({
   model: payload.model,
-  notes: "account fallback",
+  notes: "account provider",
   zones: [{label: "Brixton", evidence_urls: ["https://example.test/source"]}]
 }));
 """,
@@ -163,7 +163,7 @@ process.stdout.write(JSON.stringify({
 
     monkeypatch.setattr(codex_module.settings, "codex_home", str(codex_home))
     monkeypatch.setattr(codex_module.settings, "codex_agent_enabled", True)
-    monkeypatch.setattr(codex_module.settings, "area_risk_codex_fallback_enabled", True)
+    monkeypatch.setattr(codex_module.settings, "area_risk_account_enabled", True)
     monkeypatch.setattr(codex_module.settings, "area_risk_codex_model", "gpt-5.6-sol")
     monkeypatch.setattr(codex_module.settings, "area_risk_codex_reasoning_effort", "low")
     monkeypatch.setattr(codex_module.settings, "area_risk_codex_timeout", 30)
@@ -185,7 +185,7 @@ process.stdout.write(JSON.stringify({
 
     assert result == {
         "model": "gpt-5.6-sol",
-        "notes": "account fallback",
+        "notes": "account provider",
         "verifiedSourceUrls": [],
         "webSearchCompleted": False,
         "zones": [
@@ -213,7 +213,7 @@ def test_area_risk_codex_analysis_rejects_non_chatgpt_auth(
 
     monkeypatch.setattr(codex_module.settings, "codex_home", str(codex_home))
     monkeypatch.setattr(codex_module.settings, "codex_agent_enabled", True)
-    monkeypatch.setattr(codex_module.settings, "area_risk_codex_fallback_enabled", True)
+    monkeypatch.setattr(codex_module.settings, "area_risk_account_enabled", True)
     monkeypatch.setattr(codex_module, "_area_risk_runner_path", lambda: runner)
     monkeypatch.setattr(codex_module, "_cached_codex_login_method", api_login)
 
