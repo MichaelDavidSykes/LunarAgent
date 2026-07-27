@@ -22,7 +22,9 @@ def test_agent_container_has_no_host_command_surface() -> None:
     assert "--security-opt no-new-privileges" in unit
     assert "--cap-drop ALL" in unit
     assert "--tmpfs /tmp:rw,noexec,nosuid,nodev,size=512m" in unit
-    assert "Environment=LUNAR_AGENT_AREA_RISK_CODEX_FALLBACK_ENABLED=true" in unit
+    assert "Environment=LUNAR_AGENT_AREA_RISK_PROVIDER_MODE=chatgpt-account" in unit
+    assert "--env LUNAR_AGENT_AREA_RISK_PROVIDER_MODE" in unit
+    assert "Environment=LUNAR_AGENT_AREA_RISK_ACCOUNT_ENABLED=true" in unit
     assert "Environment=LUNAR_AGENT_AREA_RISK_CODEX_MODEL=gpt-5.6-sol" in unit
     assert "--env LUNAR_AGENT_AREA_RISK_CODEX_TIMEOUT" in unit
 

@@ -96,7 +96,7 @@ test("runtime is read-only and exposes no host command or file tool", () => {
   assert.doesNotMatch(mcpRuntime, /run_workspace_command|LUNAR_COMMAND_BROKER/);
 });
 
-test("area-risk account fallback permits web evidence but no local execution or MCP", () => {
+test("area-risk account provider permits web evidence but no local execution or MCP", () => {
   assert.match(areaRiskRunner, /execution_policy\.json/);
   assert.match(areaRiskRunner, /sandboxMode: EXECUTION_POLICY\.sandboxMode/);
   assert.match(areaRiskRunner, /networkAccessEnabled: EXECUTION_POLICY\.networkAccessEnabled/);

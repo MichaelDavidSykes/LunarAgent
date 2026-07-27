@@ -169,14 +169,17 @@ Optional:
 - `LUNAR_AGENT_BACKEND_BASE_URL`
 - `LUNAR_AGENT_BACKEND_SHARED_TOKEN`
 - `LUNAR_AGENT_BACKEND_HTTP_TIMEOUT`
-- `LUNAR_AGENT_AREA_RISK_MODEL` (default `gpt-5.1`)
+- `LUNAR_AGENT_AREA_RISK_PROVIDER_MODE` (default `chatgpt-account`; set to
+  `openai-api` only when API billing is intentionally enabled)
+- `LUNAR_AGENT_AREA_RISK_ACCOUNT_ENABLED` (default `true`; allows the primary
+  ChatGPT-managed account provider)
+- `LUNAR_AGENT_AREA_RISK_MODEL` (default `gpt-5.1`; API mode only)
+- `LUNAR_AGENT_AREA_RISK_WEB_RESEARCH_ENABLED` (default `true`; API mode only)
 - `LUNAR_AGENT_AREA_RISK_SEARCH_CONTEXT_SIZE` (default `medium`)
 - `LUNAR_AGENT_AREA_RISK_MAX_OUTPUT_TOKENS` (default `700`)
 - `LUNAR_AGENT_AREA_RISK_MAX_EVIDENCE_ITEMS` (default `12`)
 - `LUNAR_AGENT_AREA_RISK_MAX_ZONES` (default `6`)
 - `LUNAR_AGENT_AREA_RISK_FALLBACK_ON_EMPTY_WEB` (default `false`, avoids a second model call when web research returns no named zones)
-- `LUNAR_AGENT_AREA_RISK_CODEX_FALLBACK_ENABLED` (default `true`; uses the
-  mounted ChatGPT-managed Codex account when the OpenAI API analysis fails)
 - `LUNAR_AGENT_AREA_RISK_CODEX_MODEL` (default `LUNAR_AGENT_CODEX_MODEL` or
   `gpt-5.6-sol`)
 - `LUNAR_AGENT_AREA_RISK_CODEX_REASONING_EFFORT` (default `low`)
@@ -195,14 +198,18 @@ Optional:
 
 The Explorer LunarAgent endpoint does not pass `OPENAI_API_KEY` to Codex and
 uses the ChatGPT-managed authentication mounted at `CODEX_HOME`. SafeRoute
-area-risk research keeps the OpenAI API as its primary provider, but falls back
-to that same ChatGPT-managed Codex account when the API call fails. The fallback
-receives only bounded public evidence and public AOI metadata, may use the same
-server-side live web research capability as Explorer, has MCP/shell/file and
-local-network access disabled, and never receives `OPENAI_API_KEY` or Lunar
-service credentials. If both
-providers fail, the request fails truthfully so the caller can retry instead of
-recording a false successful zero-zone result. Both providers are constrained
+area-risk research uses that same ChatGPT-account provider by default, including
+its server-side public web research. It receives only bounded public evidence
+and public AOI metadata, has MCP/shell/file and local-network access disabled,
+and never receives `OPENAI_API_KEY` or Lunar service credentials.
+
+`LUNAR_AGENT_AREA_RISK_PROVIDER_MODE=openai-api` is the single explicit billing
+switch. In that mode the existing Responses API web-research and evidence
+analysis logic is retained. Neither mode silently falls through to the other:
+an unavailable selected provider fails truthfully so the caller can retry,
+without surprise billing or a false successful zero-zone result. Deterministic
+headline/regex label extraction is not part of the pipeline; only AI-generated,
+source-validated locality zones can be returned. Both providers are constrained
 to locality-level zones with a hard 2,500 metre radius ceiling; city-scale
 radius or coordinate geometry is rejected rather than silently shrunk into a
 falsely precise hotspot.

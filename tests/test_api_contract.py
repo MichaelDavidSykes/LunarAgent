@@ -145,6 +145,7 @@ def test_health_reports_authentication_is_configured(monkeypatch):
         return {"configured": True, "mode": "chatgpt"}
 
     monkeypatch.setattr(main_module.settings, "shared_token", "configured-secret")
+    monkeypatch.setattr(main_module.settings, "area_risk_provider_mode", "chatgpt-account")
     monkeypatch.setattr(main_module.settings, "openai_api_key", "configured-openai-key")
     monkeypatch.setattr(main_module.settings, "backend_base_url", "https://backend.example.test")
     monkeypatch.setattr(main_module.settings, "backend_shared_token", "configured-backend-token")
@@ -155,45 +156,75 @@ def test_health_reports_authentication_is_configured(monkeypatch):
     assert response.json()["authConfigured"] is True
     assert response.json()["dependenciesConfigured"] is True
     assert response.json()["areaRiskAnalysis"] == {
+        "providerMode": "chatgpt-account",
+        "billingMode": "chatgpt-plan",
+        "providerReady": True,
         "apiConfigured": True,
-        "codexFallbackEnabled": True,
-        "codexFallbackReady": True,
-        "codexModel": main_module.settings.area_risk_codex_model,
+        "accountEnabled": True,
+        "accountReady": True,
+        "accountModel": main_module.settings.area_risk_codex_model,
     }
 
 
-def test_health_accepts_chatgpt_area_risk_fallback_without_openai_api_key(monkeypatch):
+def test_health_accepts_chatgpt_account_provider_without_openai_api_key(monkeypatch):
     async def configured_auth():
         return {"configured": True, "mode": "chatgpt"}
 
     monkeypatch.setattr(main_module.settings, "shared_token", "configured-secret")
+    monkeypatch.setattr(main_module.settings, "area_risk_provider_mode", "chatgpt-account")
     monkeypatch.setattr(main_module.settings, "openai_api_key", "")
     monkeypatch.setattr(main_module.settings, "backend_base_url", "https://backend.example.test")
     monkeypatch.setattr(main_module.settings, "backend_shared_token", "configured-backend-token")
     monkeypatch.setattr(main_module.settings, "codex_agent_enabled", True)
-    monkeypatch.setattr(main_module.settings, "area_risk_codex_fallback_enabled", True)
+    monkeypatch.setattr(main_module.settings, "area_risk_account_enabled", True)
     monkeypatch.setattr(main_module, "codex_auth_status", configured_auth)
 
     response = TestClient(main_module.app).get("/health")
 
     assert response.status_code == 200
+    assert response.json()["areaRiskAnalysis"]["providerMode"] == "chatgpt-account"
+    assert response.json()["areaRiskAnalysis"]["billingMode"] == "chatgpt-plan"
+    assert response.json()["areaRiskAnalysis"]["providerReady"] is True
     assert response.json()["areaRiskAnalysis"]["apiConfigured"] is False
-    assert response.json()["areaRiskAnalysis"]["codexFallbackReady"] is True
+    assert response.json()["areaRiskAnalysis"]["accountReady"] is True
 
 
-def test_health_fails_without_api_or_ready_chatgpt_area_risk_provider(monkeypatch):
+def test_health_account_mode_fails_closed_even_when_api_key_is_available(monkeypatch):
     async def unavailable_auth():
         return {"configured": False, "mode": "chatgpt"}
 
     monkeypatch.setattr(main_module.settings, "shared_token", "configured-secret")
-    monkeypatch.setattr(main_module.settings, "openai_api_key", "")
+    monkeypatch.setattr(main_module.settings, "area_risk_provider_mode", "chatgpt-account")
+    monkeypatch.setattr(main_module.settings, "openai_api_key", "configured-openai-key")
     monkeypatch.setattr(main_module.settings, "backend_base_url", "https://backend.example.test")
     monkeypatch.setattr(main_module.settings, "backend_shared_token", "configured-backend-token")
     monkeypatch.setattr(main_module.settings, "codex_agent_enabled", True)
-    monkeypatch.setattr(main_module.settings, "area_risk_codex_fallback_enabled", True)
+    monkeypatch.setattr(main_module.settings, "area_risk_account_enabled", True)
     monkeypatch.setattr(main_module, "codex_auth_status", unavailable_auth)
 
     assert TestClient(main_module.app).get("/health").status_code == 503
+
+
+def test_health_api_mode_uses_only_api_readiness(monkeypatch):
+    async def unavailable_auth():
+        return {"configured": False, "mode": "chatgpt"}
+
+    monkeypatch.setattr(main_module.settings, "shared_token", "configured-secret")
+    monkeypatch.setattr(main_module.settings, "area_risk_provider_mode", "openai-api")
+    monkeypatch.setattr(main_module.settings, "openai_api_key", "configured-openai-key")
+    monkeypatch.setattr(main_module.settings, "backend_base_url", "https://backend.example.test")
+    monkeypatch.setattr(main_module.settings, "backend_shared_token", "configured-backend-token")
+    monkeypatch.setattr(main_module.settings, "codex_agent_enabled", True)
+    monkeypatch.setattr(main_module.settings, "area_risk_account_enabled", True)
+    monkeypatch.setattr(main_module, "codex_auth_status", unavailable_auth)
+
+    response = TestClient(main_module.app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["areaRiskAnalysis"]["providerMode"] == "openai-api"
+    assert response.json()["areaRiskAnalysis"]["billingMode"] == "openai-api"
+    assert response.json()["areaRiskAnalysis"]["providerReady"] is True
+    assert response.json()["areaRiskAnalysis"]["accountReady"] is False
 
 
 def test_health_fails_when_runtime_dependencies_are_missing(monkeypatch):

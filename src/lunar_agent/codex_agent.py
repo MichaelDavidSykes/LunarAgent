@@ -426,7 +426,7 @@ async def run_area_risk_codex_analysis(
     evidence_urls: set[str] | None = None,
 ) -> dict[str, Any]:
     """Analyze bounded public area-risk evidence through ChatGPT-authenticated Codex."""
-    if not settings.codex_agent_enabled or not settings.area_risk_codex_fallback_enabled:
+    if not settings.codex_agent_enabled or not settings.area_risk_account_enabled:
         raise ExplorerCodexRuntimeError("runtime_unavailable")
     execution_policy_status()
     runner_path = _area_risk_runner_path()
