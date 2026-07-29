@@ -44,24 +44,30 @@ function suspiciousInstructionText(value) {
   ].some((pattern) => pattern.test(text));
 }
 
-function privateIpv4(hostname) {
+function nonPublicIpv4(hostname) {
   const parts = hostname.split(".");
   if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part))) return false;
   const octets = parts.map(Number);
   if (octets.some((part) => part > 255)) return true;
-  const [first, second] = octets;
+  const [first, second, third] = octets;
   return (
     first === 0 ||
     first === 10 ||
+    (first === 100 && second >= 64 && second <= 127) ||
     first === 127 ||
     (first === 169 && second === 254) ||
     (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 0) ||
+    (first === 192 && second === 88 && third === 99) ||
     (first === 192 && second === 168) ||
+    (first === 198 && second >= 18 && second <= 19) ||
+    (first === 198 && second === 51 && third === 100) ||
+    (first === 203 && second === 0 && third === 113) ||
     first >= 224
   );
 }
 
-function privateIpv6(hostname) {
+function nonPublicIpv6(hostname) {
   const normalized = hostname.toLowerCase();
   if (!normalized.includes(":")) return false;
   if (
@@ -69,13 +75,25 @@ function privateIpv6(hostname) {
   ) {
     return true;
   }
-  const firstSegment = normalized.split(":").find(Boolean);
+  const segments = normalized.split(":").filter(Boolean);
+  const firstSegment = segments[0];
   if (!firstSegment || !/^[0-9a-f]{1,4}$/.test(firstSegment)) return true;
   const firstHextet = Number.parseInt(firstSegment, 16);
+  const secondSegment = segments[1] || "";
+  const secondHextet = /^[0-9a-f]{1,4}$/.test(secondSegment)
+    ? Number.parseInt(secondSegment, 16)
+    : null;
   return (
     (firstHextet & 0xfe00) === 0xfc00 ||
     (firstHextet & 0xffc0) === 0xfe80 ||
-    (firstHextet & 0xff00) === 0xff00
+    (firstHextet & 0xff00) === 0xff00 ||
+    (
+      firstHextet === 0x2001 &&
+      (
+        secondHextet === 0x0db8 ||
+        (secondHextet !== null && secondHextet >= 0x0010 && secondHextet <= 0x002f)
+      )
+    )
   );
 }
 
@@ -97,8 +115,8 @@ export function safePublicUrl(value) {
     hostname.endsWith(".localhost") ||
     hostname.endsWith(".local") ||
     hostname.endsWith(".internal") ||
-    privateIpv4(hostname) ||
-    privateIpv6(hostname) ||
+    nonPublicIpv4(hostname) ||
+    nonPublicIpv6(hostname) ||
     (!hostname.includes(":") && !hostname.includes("."))
   ) {
     return "";
