@@ -2,6 +2,7 @@
 
 import { Codex } from "@openai/codex-sdk";
 import fs from "node:fs";
+import { safePublicUrl } from "./output_guardrails.mjs";
 
 const EXECUTION_POLICY = Object.freeze(
   JSON.parse(
@@ -131,26 +132,6 @@ function outputSchema(maxZones) {
     },
     required: ["zones", "notes", "verifiedSourceUrls"],
   };
-}
-
-function safePublicUrl(value) {
-  try {
-    const text = String(value || "").trim();
-    const parsed = new URL(text);
-    const host = parsed.hostname.toLowerCase();
-    if (!["http:", "https:"].includes(parsed.protocol) || !host || parsed.username || parsed.password) return "";
-    if (
-      host === "localhost" ||
-      host.endsWith(".localhost") ||
-      host.endsWith(".local") ||
-      /^(127\.|10\.|192\.168\.|169\.254\.)/.test(host) ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-      host === "::1"
-    ) return "";
-    return text;
-  } catch {
-    return "";
-  }
 }
 
 async function main() {
