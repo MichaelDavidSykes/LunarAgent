@@ -80,6 +80,8 @@ test("rich media is public, provenance-bound, and never face-inferred", () => {
   assert.match(runner, /never rely on a fixed person list, camera catalogue, or hard-coded feed/);
   assert.match(runner, /Use media opportunistically when it makes the investigation materially clearer/);
   assert.match(runner, /Each media\.sourceUrl must be a citation inspected in this turn/);
+  assert.match(runner, /canonical feed URL without autoplay or tracking parameters/);
+  assert.match(runner, /trusted Explorer UI controls muted autoplay/);
   assert.match(runner, /Never infer identity from a face/);
   assert.match(runner, /authenticated\/private camera feeds/);
   assert.match(runner, /required: \["finalResponse", "entities", "citations", "media", "actions", "followUps"\]/);
