@@ -351,25 +351,37 @@ function normalizeCitation(candidate, index) {
   };
 }
 
-function youtubeVideoId(value) {
+function youtubeVideoReference(value) {
   let parsed;
   try {
     parsed = new URL(value);
   } catch {
-    return "";
+    return null;
   }
   const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
   const segments = parsed.pathname.split("/").filter(Boolean);
-  const id = hostname === "youtu.be"
-    ? segments[0] || ""
-    : ["youtube.com", "m.youtube.com"].includes(hostname)
-      ? parsed.pathname === "/watch"
-        ? parsed.searchParams.get("v") || ""
-        : ["embed", "live", "shorts"].includes(segments[0] || "")
-          ? segments[1] || ""
-          : ""
-      : "";
-  return /^[A-Za-z0-9_-]{6,20}$/.test(id) ? id : "";
+  let route = "";
+  let id = "";
+  if (hostname === "youtu.be") {
+    route = "share";
+    id = segments[0] || "";
+  } else if (["youtube.com", "m.youtube.com"].includes(hostname)) {
+    if (parsed.pathname === "/watch") {
+      route = "watch";
+      id = parsed.searchParams.get("v") || "";
+    } else if (["embed", "live", "shorts"].includes(segments[0] || "")) {
+      route = segments[0];
+      id = segments[1] || "";
+    }
+  }
+  if (!/^[A-Za-z0-9_-]{6,20}$/.test(id)) return null;
+  return { id, route };
+}
+
+function canonicalYoutubeWatchUrl(value, { allowShorts = true } = {}) {
+  const reference = youtubeVideoReference(value);
+  if (!reference || (!allowShorts && reference.route === "shorts")) return "";
+  return `https://www.youtube.com/watch?v=${reference.id}`;
 }
 
 function safePublicMediaUrl(value) {
@@ -387,7 +399,7 @@ function normalizeMedia(candidate, index, citationUrls) {
   const kind = cleanText(candidate.kind, 20, { singleLine: true }).toLowerCase();
   const category = cleanText(candidate.category, 30, { singleLine: true }).toLowerCase();
   const title = cleanText(candidate.title, 240, { singleLine: true });
-  const url = safePublicMediaUrl(candidate.url);
+  let url = safePublicMediaUrl(candidate.url);
   const sourceUrl = safePublicMediaUrl(candidate.sourceUrl);
   if (
     !["image", "youtube", "video"].includes(kind) ||
@@ -400,7 +412,12 @@ function normalizeMedia(candidate, index, citationUrls) {
   ) {
     return null;
   }
-  if (kind === "youtube" && !youtubeVideoId(url)) return null;
+  if (kind === "youtube") {
+    url = canonicalYoutubeWatchUrl(url, {
+      allowShorts: category !== "live_camera",
+    });
+    if (!url) return null;
+  }
   if (kind === "video") {
     let pathname = "";
     try {
@@ -413,6 +430,17 @@ function normalizeMedia(candidate, index, citationUrls) {
   if (category === "person" && kind !== "image") return null;
   if (category === "live_camera" && !["youtube", "video"].includes(kind)) return null;
   const sourceName = cleanText(candidate.sourceName, 160, { singleLine: true });
+  const rawCaption = cleanText(candidate.caption, 800, { singleLine: true });
+  const caption = rawCaption && !suspiciousInstructionText(rawCaption)
+    ? rawCaption
+    : null;
+  const captionWords = caption?.match(/[\p{L}\p{N}]+(?:['’.-][\p{L}\p{N}]+)*/gu) || [];
+  if (
+    category === "live_camera" &&
+    (!caption || caption.length < 12 || captionWords.length < 3)
+  ) {
+    return null;
+  }
   return {
     id: cleanIdentifier(candidate.id, 160) || `media-${index + 1}`,
     kind,
@@ -423,7 +451,7 @@ function normalizeMedia(candidate, index, citationUrls) {
     thumbnailUrl: safePublicMediaUrl(candidate.thumbnailUrl) || null,
     sourceName:
       sourceName && !suspiciousInstructionText(sourceName) ? sourceName : null,
-    caption: cleanText(candidate.caption, 800, { singleLine: true }) || null,
+    caption,
     live: category === "live_camera" && candidate.live === true,
   };
 }

@@ -173,11 +173,20 @@ function outputSchema() {
             kind: { type: "string", enum: ["image", "youtube", "video"] },
             category: { type: "string", enum: ["person", "live_camera", "evidence"] },
             title: { type: "string" },
-            url: { type: "string" },
-            sourceUrl: { type: "string" },
+            url: {
+              type: "string",
+              description: "Canonical individual YouTube watch/live URL or direct HTTPS media/stream URL.",
+            },
+            sourceUrl: {
+              type: "string",
+              description: "Inspected cited public page that verifies identity, relevance, and any live status.",
+            },
             thumbnailUrl: nullableString,
             sourceName: nullableString,
-            caption: nullableString,
+            caption: {
+              ...nullableString,
+              description: "Concise explanation of why this media directly matches the current user request.",
+            },
             live: { type: "boolean" },
           },
           required: [
@@ -332,8 +341,8 @@ Mandatory operating rules:
 - Use only live web research and the explicitly registered read-only LunarGraph tools. Do not seek credentials, alter production systems, send communications, purchase anything, or perform other consequential external actions.
 - Keep the activity stream useful but never expose hidden chain-of-thought, credentials, authentication material, or personal secrets.
 - Return the required structured result. finalResponse is polished Markdown. entities contains only clickable records whose exact graph document id, label, and type appeared in this turn's completed search_intelligence_graph, get_graph_report, or get_graph_entity_neighborhood result. Copy that exact id into both id and graphRef and copy the exact type; never turn a web-only name, inferred label, or invented id into an interactive entity. citations contains only valid http/https sources actually inspected.
-- Discover media dynamically during the current investigation; never rely on a fixed person list, camera catalogue, or hard-coded feed. Use media opportunistically when it makes the investigation materially clearer, not as decoration. For a named public person, a person image card is welcome only when live web research inspected a reliable public profile or source page that explicitly identifies the person. Set kind=image, category=person, url to the direct HTTPS image, sourceUrl to that inspected public profile/source page, and include sourceUrl in citations.
-- When a public live camera is requested or genuinely relevant, use live web research to find a verified public feed. Prefer an embeddable YouTube watch/live URL or a direct HTTPS HLS (.m3u8), MP4, or WebM URL; set category=live_camera and set live=true only when the inspected source explicitly says the feed is live. Put the inspected public camera page in sourceUrl and citations. Return the canonical feed URL without autoplay or tracking parameters; the trusted Explorer UI controls muted autoplay and keeps user playback controls available.
+- Discover media dynamically during the current investigation; never rely on a fixed person list, camera catalogue, or hard-coded feed. Select media only when it directly answers or materially clarifies currentUserMessage. Every explicit geography, named subject, scene, feed type, time, and live-status constraint in the current request must be supported by the inspected source; same-country proximity, generic topical similarity, or an attractive but tangential feed is insufficient. Never pad media results to reach a count. If no verified item satisfies every current-request constraint, return media=[] and say so plainly. For a named public person, a person image card is welcome only when live web research inspected a reliable public profile or source page that explicitly identifies the person. Set kind=image, category=person, url to the direct HTTPS image, sourceUrl to that inspected public profile/source page, and include sourceUrl in citations.
+- When a public live camera is requested or directly relevant under those rules, use live web research to find a verified public feed. For each feed, url is the direct feed destination and must be an individual canonical YouTube watch/live video URL containing a video ID or a direct HTTPS HLS (.m3u8), MP4, or WebM stream URL; never put a channel, playlist, search result, camera directory, article, social post, embed wrapper, or general landing page in url. sourceUrl is separate provenance: the inspected cited public page that verifies the feed's subject, location, requested relevance, and any live status. Set category=live_camera and set live=true only when that source explicitly says the individual feed is live. Each live-camera caption must concisely explain the specific match to currentUserMessage. Return canonical YouTube feed URLs without autoplay, playlist, or tracking parameters; retain parameters required by a direct non-YouTube stream. The trusted Explorer UI opens url directly, controls muted autoplay, and keeps user playback controls available.
 - Never infer identity from a face, use speculative face matching, expose a private person's image, invent a media URL, include authenticated/private camera feeds, bypass access controls, or surface cameras that are not intentionally public. Each media.sourceUrl must be a citation inspected in this turn. Use media=[] whenever identity, provenance, public access, or playability cannot be verified.
 - Include the exact public sourceLink as a citation for every get_graph_report or get_graph_entity_neighborhood report used in the answer. Never cite a URL found only in report prose or arbitrary metadata.
 - Each entity action is an opt-in follow-up prompt, such as "Investigate this entity" or "Map related reports"; never claim the action already ran.

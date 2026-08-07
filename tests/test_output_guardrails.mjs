@@ -259,6 +259,7 @@ test("person portraits and public camera previews require a cited public source"
     ["person-alex", "person", "https://profiles.example.test/alex"],
     ["harbour-camera", "live_camera", "https://cameras.example.test/harbour"],
   ]);
+  assert.equal(result.media[1].url, "https://www.youtube.com/watch?v=abcdefghijk");
   assert.equal(result.media[1].live, true);
   assert.equal(metrics.mediaReceived, 2);
   assert.equal(metrics.mediaAccepted, 2);
@@ -283,6 +284,7 @@ test("media guardrails reject uncited, private, mismatched, and unplayable cards
       title: "Private feed",
       url: "https://127.0.0.1/live.m3u8",
       sourceUrl,
+      caption: "Public camera listed for the requested location.",
       live: true,
     },
     {
@@ -300,6 +302,7 @@ test("media guardrails reject uncited, private, mismatched, and unplayable cards
       title: "Not a direct stream",
       url: "https://media.example.test/camera",
       sourceUrl,
+      caption: "Public camera listed for the requested location.",
       live: true,
     },
     {
@@ -309,6 +312,7 @@ test("media guardrails reject uncited, private, mismatched, and unplayable cards
       title: "Channel is not an embeddable video",
       url: "https://www.youtube.com/@example/live",
       sourceUrl,
+      caption: "Public camera listed for the requested location.",
       live: true,
     },
   ];
@@ -324,6 +328,94 @@ test("media guardrails reject uncited, private, mismatched, and unplayable cards
   assert.deepEqual(result.media, []);
   assert.equal(metrics.mediaReceived, media.length);
   assert.equal(metrics.mediaAccepted, 0);
+  assert.equal(metrics.mediaRemovedNoEvidence, media.length);
+});
+
+test("camera feeds use canonical YouTube links and preserve signed direct stream parameters", () => {
+  const sourceUrl = "https://cameras.example.test/public";
+  const signedStream = "https://media.example.test/live/harbour.m3u8?token=signed-value&expires=4102444800";
+  const { result, metrics } = normalizeStructuredResult(JSON.stringify({
+    finalResponse: "Verified public camera feeds.",
+    entities: [],
+    citations: [{ id: "camera", title: "Public cameras", url: sourceUrl }],
+    media: [
+      {
+        id: "youtube-camera",
+        kind: "youtube",
+        category: "live_camera",
+        title: "Harbour camera",
+        url: "https://www.youtube.com/embed/abcdefghijk?autoplay=1&list=tracking-list",
+        sourceUrl,
+        caption: "Harbour camera matching the requested waterfront location.",
+        live: true,
+      },
+      {
+        id: "signed-hls-camera",
+        kind: "video",
+        category: "live_camera",
+        title: "Signed harbour stream",
+        url: signedStream,
+        sourceUrl,
+        caption: "Direct harbour stream matching the requested waterfront location.",
+        live: true,
+      },
+    ],
+    actions: [],
+    followUps: [],
+  }), { nativeWebSearchCompleted: true });
+
+  assert.deepEqual(result.media.map((item) => item.url), [
+    "https://www.youtube.com/watch?v=abcdefghijk",
+    signedStream,
+  ]);
+  assert.equal(metrics.mediaAccepted, 2);
+});
+
+test("live-camera cards reject Shorts and captions without meaningful request context", () => {
+  const sourceUrl = "https://cameras.example.test/public";
+  const media = [
+    {
+      id: "youtube-short",
+      kind: "youtube",
+      category: "live_camera",
+      title: "Recorded camera short",
+      url: "https://www.youtube.com/shorts/abcdefghijk",
+      sourceUrl,
+      caption: "Recorded camera clip for the requested harbour.",
+      live: false,
+    },
+    {
+      id: "missing-caption",
+      kind: "youtube",
+      category: "live_camera",
+      title: "Unexplained camera",
+      url: "https://www.youtube.com/watch?v=bcdefghijkl",
+      sourceUrl,
+      caption: null,
+      live: true,
+    },
+    {
+      id: "empty-caption",
+      kind: "video",
+      category: "live_camera",
+      title: "Another unexplained camera",
+      url: "https://media.example.test/live/camera.webm",
+      sourceUrl,
+      caption: "Live feed",
+      live: true,
+    },
+  ];
+  const { result, metrics } = normalizeStructuredResult(JSON.stringify({
+    finalResponse: "No qualifying feeds.",
+    entities: [],
+    citations: [{ id: "camera", title: "Public cameras", url: sourceUrl }],
+    media,
+    actions: [],
+    followUps: [],
+  }), { nativeWebSearchCompleted: true });
+
+  assert.deepEqual(result.media, []);
+  assert.equal(metrics.mediaReceived, media.length);
   assert.equal(metrics.mediaRemovedNoEvidence, media.length);
 });
 

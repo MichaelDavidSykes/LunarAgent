@@ -78,10 +78,16 @@ test("turn knowledge is deterministically derived from completed MCP evidence", 
 test("rich media is public, provenance-bound, and never face-inferred", () => {
   assert.match(runner, /Discover media dynamically during the current investigation/);
   assert.match(runner, /never rely on a fixed person list, camera catalogue, or hard-coded feed/);
-  assert.match(runner, /Use media opportunistically when it makes the investigation materially clearer/);
+  assert.match(runner, /Select media only when it directly answers or materially clarifies currentUserMessage/);
+  assert.match(runner, /Every explicit geography, named subject, scene, feed type, time, and live-status constraint/);
+  assert.match(runner, /Never pad media results to reach a count/);
+  assert.match(runner, /return media=\[\]/);
+  assert.match(runner, /url is the direct feed destination/);
+  assert.match(runner, /sourceUrl is separate provenance/);
+  assert.match(runner, /caption must concisely explain the specific match to currentUserMessage/);
   assert.match(runner, /Each media\.sourceUrl must be a citation inspected in this turn/);
-  assert.match(runner, /canonical feed URL without autoplay or tracking parameters/);
-  assert.match(runner, /trusted Explorer UI controls muted autoplay/);
+  assert.match(runner, /canonical YouTube feed URLs without autoplay, playlist, or tracking parameters/);
+  assert.match(runner, /trusted Explorer UI opens url directly, controls muted autoplay/);
   assert.match(runner, /Never infer identity from a face/);
   assert.match(runner, /authenticated\/private camera feeds/);
   assert.match(runner, /required: \["finalResponse", "entities", "citations", "media", "actions", "followUps"\]/);
