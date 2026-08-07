@@ -846,6 +846,7 @@ async def run_explorer_codex_turn(
         "queryPreview": request.queryPreview,
         "querySummary": request.querySummary,
         "queryContext": request.queryContext,
+        "investigationKnowledge": request.investigationKnowledge,
         "allowUiActions": bool(request.allowUiActions),
         "model": str(settings.codex_agent_model or "gpt-5.6-sol").strip(),
         "reasoningEffort": str(settings.codex_agent_reasoning_effort or "medium").strip(),
@@ -990,6 +991,7 @@ async def run_explorer_codex_turn(
         entities=list(result.get("entities") or [])[:100],
         citations=list(result.get("citations") or [])[:100],
         media=list(result.get("media") or [])[:12],
+        turnKnowledge=result.get("turnKnowledge") or {},
     )
     if not response.codexThreadId:
         raise ExplorerCodexRuntimeError("graph_session_stale")

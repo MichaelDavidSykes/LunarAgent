@@ -5,7 +5,11 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from lunar_agent import main as main_module
-from lunar_agent.models import ExplorerAgentCancelRequest, ExplorerAgentRespondRequest
+from lunar_agent.models import (
+    ExplorerAgentCancelRequest,
+    ExplorerAgentRespondRequest,
+    ExplorerAgentRespondResponse,
+)
 from lunar_agent.turn_registry import ExplorerTurnRegistry
 
 
@@ -19,6 +23,33 @@ def _authenticated_client(monkeypatch):
     client = TestClient(main_module.app)
     client.headers.update({"Authorization": "Bearer unit-test-shared-token"})
     return client
+
+
+def test_explorer_agent_knowledge_contract_is_bounded():
+    request = ExplorerAgentRespondRequest(
+        queryPreview="Current Explorer scope",
+        currentUserMessage="Continue the investigation",
+        investigationKnowledge={"summary": "x" * 39000},
+    )
+    response = ExplorerAgentRespondResponse(
+        reply="Grounded result",
+        turnKnowledge={"summary": "x" * 39000},
+    )
+
+    assert len(request.investigationKnowledge["summary"]) == 39000
+    assert len(response.turnKnowledge["summary"]) == 39000
+
+    with pytest.raises(ValueError, match="investigationKnowledge"):
+        ExplorerAgentRespondRequest(
+            queryPreview="Current Explorer scope",
+            currentUserMessage="Continue the investigation",
+            investigationKnowledge={"summary": "x" * 40001},
+        )
+    with pytest.raises(ValueError, match="turnKnowledge"):
+        ExplorerAgentRespondResponse(
+            reply="Grounded result",
+            turnKnowledge={"summary": "x" * 40001},
+        )
 
 
 def test_explorer_agent_endpoint_hides_internal_error_detail(monkeypatch):
@@ -268,6 +299,9 @@ def test_explorer_agent_endpoint_uses_codex_runtime(monkeypatch):
     async def fake_codex_turn(request):
         assert request.sessionId == "explorer-session-1"
         assert request.requestId == "turn-0001"
+        assert request.investigationKnowledge["graphEntities"][0]["graphRef"] == (
+            "nodes_vertex_collection/acme"
+        )
         return {
             "reply": "Investigated",
             "codexThreadId": "codex-thread-1",
@@ -276,6 +310,17 @@ def test_explorer_agent_endpoint_uses_codex_runtime(monkeypatch):
             "followUps": [],
             "entities": [],
             "citations": [],
+            "turnKnowledge": {
+                "schemaVersion": 1,
+                "graphEntities": [
+                    {
+                        "id": "nodes_vertex_collection/acme",
+                        "label": "Acme",
+                        "type": "company",
+                    }
+                ],
+                "graphSources": [],
+            },
         }
 
     monkeypatch.setattr(main_module, "run_explorer_codex_turn", fake_codex_turn)
@@ -289,6 +334,17 @@ def test_explorer_agent_endpoint_uses_codex_runtime(monkeypatch):
             "queryPreview": "Current Explorer scope",
             "queryContext": {},
             "querySummary": {},
+            "investigationKnowledge": {
+                "schemaVersion": 1,
+                "graphEntities": [
+                    {
+                        "graphRef": "nodes_vertex_collection/acme",
+                        "label": "Acme",
+                        "type": "company",
+                    }
+                ],
+                "graphSources": [],
+            },
             "currentUserMessage": "Investigate Acme",
             "selectedEntities": [],
             "conversationHistory": [],
@@ -298,6 +354,9 @@ def test_explorer_agent_endpoint_uses_codex_runtime(monkeypatch):
     assert response.status_code == 200
     assert response.json()["reply"] == "Investigated"
     assert response.json()["model"] == "gpt-5.6-sol"
+    assert response.json()["turnKnowledge"]["graphEntities"][0]["id"] == (
+        "nodes_vertex_collection/acme"
+    )
 
 
 def test_explorer_agent_endpoint_replays_one_exact_runtime_result(monkeypatch):

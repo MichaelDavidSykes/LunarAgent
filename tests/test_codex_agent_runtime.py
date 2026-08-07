@@ -315,6 +315,17 @@ def _request() -> ExplorerAgentRespondRequest:
         queryPreview="Current Explorer scope",
         queryContext={},
         querySummary={},
+        investigationKnowledge={
+            "schemaVersion": 1,
+            "graphEntities": [
+                {
+                    "id": "nodes_vertex_collection/acme",
+                    "label": "Acme",
+                    "type": "company",
+                }
+            ],
+            "graphSources": [],
+        },
         currentUserMessage="Investigate Acme",
         selectedEntities=[
             {
@@ -419,6 +430,7 @@ process.stdout.write(JSON.stringify({
     message: "working",
     leakedOpenAi: Boolean(process.env.OPENAI_API_KEY),
     leakedBackend: Boolean(process.env.LUNAR_AGENT_BACKEND_SHARED_TOKEN),
+    knowledgeGraphRef: payload.investigationKnowledge.graphEntities[0].id,
     hasCommandBrokerPayload: Object.keys(payload).some((key) =>
       key.startsWith("commandBroker") || key === "commandWorkspaceId"
     )
@@ -432,7 +444,22 @@ process.stdout.write(JSON.stringify({
   actions: [],
   followUps: [],
   entities: [{id: "acme", type: "company", label: "Acme"}],
-  citations: []
+  citations: [],
+  turnKnowledge: {
+    schemaVersion: 1,
+    graphEntities: [{
+      id: "nodes_vertex_collection/acme",
+      label: "Acme",
+      type: "company"
+    }],
+    graphSources: [{
+      title: "Acme report",
+      url: "https://example.test/acme",
+      sourceName: "Example",
+      publishedAt: "2026-08-07T00:00:00Z",
+      snippet: null
+    }]
+  }
 }) + "\\n");
 """.strip(),
         encoding="utf-8",
@@ -479,10 +506,15 @@ process.stdout.write(JSON.stringify({
     assert response.reply == "Grounded result"
     assert response.codexThreadId == "codex-1"
     assert response.entities[0]["label"] == "Acme"
+    assert response.turnKnowledge["schemaVersion"] == 1
+    assert response.turnKnowledge["graphEntities"][0]["id"] == (
+        "nodes_vertex_collection/acme"
+    )
     assert checkpoints == ["codex-1"]
     assert len(result_checkpoints) == 1
     assert result_checkpoints[0].reply == "Grounded result"
     assert result_checkpoints[0].codexThreadId == "codex-1"
+    assert result_checkpoints[0].turnKnowledge == response.turnKnowledge
     assert events == [
         (
             "tool.progress",
@@ -490,6 +522,7 @@ process.stdout.write(JSON.stringify({
                 "message": "working",
                 "leakedOpenAi": False,
                 "leakedBackend": False,
+                "knowledgeGraphRef": "nodes_vertex_collection/acme",
                 "hasCommandBrokerPayload": False,
             },
         )
@@ -699,6 +732,17 @@ def test_runtime_result_checkpoint_transport_retries_exact_payload(
         reply="Grounded result",
         model="gpt-5.6-sol",
         codexThreadId="codex-durable-1",
+        turnKnowledge={
+            "schemaVersion": 1,
+            "graphEntities": [
+                {
+                    "id": "nodes_vertex_collection/acme",
+                    "label": "Acme",
+                    "type": "company",
+                }
+            ],
+            "graphSources": [],
+        },
     )
     calls = []
     delays = []
@@ -741,6 +785,9 @@ def test_runtime_result_checkpoint_transport_retries_exact_payload(
     assert calls[0][1]["request_id"] == "turn-0001"
     assert calls[0][1]["codex_thread_id"] == "codex-durable-1"
     assert calls[0][1]["result"]["reply"] == "Grounded result"
+    assert calls[0][1]["result"]["turnKnowledge"]["graphEntities"][0]["id"] == (
+        "nodes_vertex_collection/acme"
+    )
 
 
 def test_runtime_fails_closed_when_backend_rejects_final_result_checkpoint(

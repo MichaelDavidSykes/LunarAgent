@@ -9,6 +9,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 EXPLORER_AGENT_MESSAGE_MAX_CHARS = 6000
 EXPLORER_AGENT_HISTORY_MAX_MESSAGES = 10
 EXPLORER_AGENT_CONTEXT_MAX_CHARS = 20000
+EXPLORER_AGENT_KNOWLEDGE_MAX_CHARS = 40000
 SAFEROUTE_AOI_MAX_CHARS = 12000
 SAFEROUTE_EVIDENCE_MAX_ITEMS = 40
 SAFEROUTE_EVIDENCE_MAX_CHARS = 40000
@@ -52,6 +53,7 @@ class ExplorerAgentRespondRequest(BaseModel):
     queryPreview: str = Field(..., min_length=1, max_length=400)
     queryContext: dict[str, Any] = Field(default_factory=dict)
     querySummary: dict[str, Any] = Field(default_factory=dict)
+    investigationKnowledge: dict[str, Any] = Field(default_factory=dict)
     currentUserMessage: str = Field(
         ..., min_length=1, max_length=EXPLORER_AGENT_MESSAGE_MAX_CHARS
     )
@@ -79,6 +81,18 @@ class ExplorerAgentRespondRequest(BaseModel):
             field_name="querySummary",
         )
 
+    @field_validator("investigationKnowledge")
+    @classmethod
+    def validate_bounded_investigation_knowledge(
+        cls,
+        value: dict[str, Any],
+    ) -> dict[str, Any]:
+        return _bounded_json_value(
+            value,
+            max_chars=EXPLORER_AGENT_KNOWLEDGE_MAX_CHARS,
+            field_name="investigationKnowledge",
+        )
+
     @field_validator("selectedEntities")
     @classmethod
     def validate_bounded_selected_entities(
@@ -101,6 +115,16 @@ class ExplorerAgentRespondResponse(BaseModel):
     entities: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
     citations: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
     media: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
+    turnKnowledge: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("turnKnowledge")
+    @classmethod
+    def validate_bounded_turn_knowledge(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _bounded_json_value(
+            value,
+            max_chars=EXPLORER_AGENT_KNOWLEDGE_MAX_CHARS,
+            field_name="turnKnowledge",
+        )
 
 
 class ExplorerAgentCancelRequest(BaseModel):
