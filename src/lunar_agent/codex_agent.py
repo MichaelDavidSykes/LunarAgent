@@ -70,7 +70,9 @@ _SAFE_FAILURE_MESSAGES = {
     ),
 }
 _codex_auth_failure_fingerprint: tuple[int, int, int] | None = None
+_codex_auth_failure_retry_at = 0.0
 _codex_auth_probe_cache: tuple[tuple[int, int, int], str | None, float] | None = None
+_CODEX_AUTH_FAILURE_RECHECK_SECONDS = 60.0
 _area_risk_codex_semaphore = asyncio.Semaphore(1)
 _MAX_AREA_RISK_RUNNER_OUTPUT_BYTES = 256_000
 
@@ -156,14 +158,19 @@ def _codex_auth_file_fingerprint() -> tuple[int, int, int] | None:
 
 
 def _mark_codex_auth_unavailable() -> None:
-    global _codex_auth_failure_fingerprint, _codex_auth_probe_cache
+    global _codex_auth_failure_fingerprint, _codex_auth_failure_retry_at
+    global _codex_auth_probe_cache
     _codex_auth_failure_fingerprint = _codex_auth_file_fingerprint()
+    _codex_auth_failure_retry_at = (
+        time.monotonic() + _CODEX_AUTH_FAILURE_RECHECK_SECONDS
+    )
     _codex_auth_probe_cache = None
 
 
 def _clear_codex_auth_failure() -> None:
-    global _codex_auth_failure_fingerprint
+    global _codex_auth_failure_fingerprint, _codex_auth_failure_retry_at
     _codex_auth_failure_fingerprint = None
+    _codex_auth_failure_retry_at = 0.0
 
 
 def _codex_cli_command() -> list[str] | None:
@@ -982,6 +989,7 @@ async def run_explorer_codex_turn(
         followUps=list(result.get("followUps") or [])[:4],
         entities=list(result.get("entities") or [])[:100],
         citations=list(result.get("citations") or [])[:100],
+        media=list(result.get("media") or [])[:12],
     )
     if not response.codexThreadId:
         raise ExplorerCodexRuntimeError("graph_session_stale")
@@ -1028,6 +1036,7 @@ async def run_explorer_codex_turn(
 
 
 async def codex_auth_status() -> dict[str, Any]:
+    global _codex_auth_failure_retry_at
     auth_fingerprint = _codex_auth_file_fingerprint()
     if not _codex_cli_command():
         return {"configured": False, "mode": "chatgpt", "detail": "Codex CLI is unavailable"}
@@ -1037,17 +1046,31 @@ async def codex_auth_status() -> dict[str, Any]:
             "mode": "chatgpt",
             "detail": "ChatGPT-managed Codex authentication is not mounted",
         }
-    if _codex_auth_failure_fingerprint == auth_fingerprint:
+    auth_failure_is_current = (
+        _codex_auth_failure_fingerprint == auth_fingerprint
+    )
+    if (
+        auth_failure_is_current
+        and time.monotonic() < _codex_auth_failure_retry_at
+    ):
         return {
             "configured": False,
             "mode": "chatgpt",
             "detail": "ChatGPT-managed Codex authentication must be reconnected",
         }
     if await _cached_codex_login_method(auth_fingerprint) != "chatgpt":
+        if auth_failure_is_current:
+            _codex_auth_failure_retry_at = (
+                time.monotonic() + _CODEX_AUTH_FAILURE_RECHECK_SECONDS
+            )
         return {
             "configured": False,
             "mode": "chatgpt",
-            "detail": "ChatGPT-managed Codex authentication is unavailable",
+            "detail": (
+                "ChatGPT-managed Codex authentication must be reconnected"
+                if auth_failure_is_current
+                else "ChatGPT-managed Codex authentication is unavailable"
+            ),
         }
     _clear_codex_auth_failure()
     return {"configured": True, "mode": "chatgpt", "detail": "ChatGPT-managed Codex authentication"}

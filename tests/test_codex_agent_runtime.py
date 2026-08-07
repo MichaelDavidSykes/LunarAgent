@@ -21,6 +21,7 @@ from lunar_agent.models import (
 @pytest.fixture(autouse=True)
 def reset_codex_auth_probe(monkeypatch):
     monkeypatch.setattr(codex_module, "_codex_auth_failure_fingerprint", None)
+    monkeypatch.setattr(codex_module, "_codex_auth_failure_retry_at", 0.0)
     monkeypatch.setattr(codex_module, "_codex_auth_probe_cache", None)
 
 
@@ -72,7 +73,7 @@ def test_codex_auth_status_rejects_api_key_login(
     }
 
 
-def test_codex_auth_failure_stays_unready_until_credentials_rotate(
+def test_codex_auth_failure_stays_unready_during_recheck_cooldown(
     tmp_path,
     monkeypatch,
 ):
@@ -96,6 +97,84 @@ def test_codex_auth_failure_stays_unready_until_credentials_rotate(
         "mode": "chatgpt",
         "detail": "ChatGPT-managed Codex authentication must be reconnected",
     }
+
+
+def test_codex_auth_failure_recovers_after_bounded_recheck(
+    tmp_path,
+    monkeypatch,
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        '{"generation":1}',
+        encoding="utf-8",
+    )
+    cli = tmp_path / "codex.js"
+    cli.write_text(
+        'process.stdout.write("Logged in using ChatGPT\\n");',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(codex_module.settings, "codex_home", str(codex_home))
+    monkeypatch.setattr(codex_module.settings, "codex_cli_path", str(cli))
+    codex_module._mark_codex_auth_unavailable()
+    monkeypatch.setattr(codex_module, "_codex_auth_failure_retry_at", 0.0)
+
+    recovered = asyncio.run(codex_module.codex_auth_status())
+
+    assert recovered == {
+        "configured": True,
+        "mode": "chatgpt",
+        "detail": "ChatGPT-managed Codex authentication",
+    }
+    assert codex_module._codex_auth_failure_fingerprint is None
+
+
+def test_codex_auth_failure_extends_cooldown_when_recheck_fails(
+    tmp_path,
+    monkeypatch,
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        '{"generation":1}',
+        encoding="utf-8",
+    )
+    cli = tmp_path / "codex.js"
+    cli.write_text(
+        'process.stdout.write("Not logged in\\n");',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(codex_module.settings, "codex_home", str(codex_home))
+    monkeypatch.setattr(codex_module.settings, "codex_cli_path", str(cli))
+    codex_module._mark_codex_auth_unavailable()
+    monkeypatch.setattr(codex_module, "_codex_auth_failure_retry_at", 0.0)
+
+    unavailable = asyncio.run(codex_module.codex_auth_status())
+
+    assert unavailable == {
+        "configured": False,
+        "mode": "chatgpt",
+        "detail": "ChatGPT-managed Codex authentication must be reconnected",
+    }
+    assert codex_module._codex_auth_failure_retry_at > time.monotonic()
+
+
+def test_codex_auth_failure_recovers_immediately_when_credentials_rotate(
+    tmp_path,
+    monkeypatch,
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    auth_file = codex_home / "auth.json"
+    auth_file.write_text('{"generation":1}', encoding="utf-8")
+    cli = tmp_path / "codex.js"
+    cli.write_text(
+        'process.stdout.write("Logged in using ChatGPT\\n");',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(codex_module.settings, "codex_home", str(codex_home))
+    monkeypatch.setattr(codex_module.settings, "codex_cli_path", str(cli))
+    codex_module._mark_codex_auth_unavailable()
 
     auth_file.write_text('{"generation":2,"rotated":true}', encoding="utf-8")
     recovered = asyncio.run(codex_module.codex_auth_status())

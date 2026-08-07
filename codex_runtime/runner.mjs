@@ -161,6 +161,38 @@ function outputSchema() {
           required: ["id", "title", "url", "sourceName", "publishedAt", "snippet"],
         },
       },
+      media: {
+        type: "array",
+        maxItems: 12,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string" },
+            kind: { type: "string", enum: ["image", "youtube", "video"] },
+            category: { type: "string", enum: ["person", "live_camera", "evidence"] },
+            title: { type: "string" },
+            url: { type: "string" },
+            sourceUrl: { type: "string" },
+            thumbnailUrl: nullableString,
+            sourceName: nullableString,
+            caption: nullableString,
+            live: { type: "boolean" },
+          },
+          required: [
+            "id",
+            "kind",
+            "category",
+            "title",
+            "url",
+            "sourceUrl",
+            "thumbnailUrl",
+            "sourceName",
+            "caption",
+            "live",
+          ],
+        },
+      },
       actions: {
         type: "array",
         maxItems: 4,
@@ -203,7 +235,7 @@ function outputSchema() {
         items: { type: "string" },
       },
     },
-    required: ["finalResponse", "entities", "citations", "actions", "followUps"],
+    required: ["finalResponse", "entities", "citations", "media", "actions", "followUps"],
   };
 }
 
@@ -258,6 +290,9 @@ Mandatory operating rules:
 - Use only live web research and the explicitly registered read-only LunarGraph tools. Do not seek credentials, alter production systems, send communications, purchase anything, or perform other consequential external actions.
 - Keep the activity stream useful but never expose hidden chain-of-thought, credentials, authentication material, or personal secrets.
 - Return the required structured result. finalResponse is polished Markdown. entities contains only clickable records whose exact graph document id, label, and type appeared in this turn's completed search_intelligence_graph, get_graph_report, or get_graph_entity_neighborhood result. Copy that exact id into both id and graphRef and copy the exact type; never turn a web-only name, inferred label, or invented id into an interactive entity. citations contains only valid http/https sources actually inspected.
+- Discover media dynamically during the current investigation; never rely on a fixed person list, camera catalogue, or hard-coded feed. Use media opportunistically when it makes the investigation materially clearer, not as decoration. For a named public person, a person image card is welcome only when live web research inspected a reliable public profile or source page that explicitly identifies the person. Set kind=image, category=person, url to the direct HTTPS image, sourceUrl to that inspected public profile/source page, and include sourceUrl in citations.
+- When a public live camera is requested or genuinely relevant, use live web research to find a verified public feed. Prefer an embeddable YouTube watch/live URL or a direct HTTPS HLS (.m3u8), MP4, or WebM URL; set category=live_camera and set live=true only when the inspected source explicitly says the feed is live. Put the inspected public camera page in sourceUrl and citations. Never autoplay media.
+- Never infer identity from a face, use speculative face matching, expose a private person's image, invent a media URL, include authenticated/private camera feeds, bypass access controls, or surface cameras that are not intentionally public. Each media.sourceUrl must be a citation inspected in this turn. Use media=[] whenever identity, provenance, public access, or playability cannot be verified.
 - Include the exact public sourceLink as a citation for every get_graph_report or get_graph_entity_neighborhood report used in the answer. Never cite a URL found only in report prose or arbitrary metadata.
 - Each entity action is an opt-in follow-up prompt, such as "Investigate this entity" or "Map related reports"; never claim the action already ran.
 - Default to actions=[] unless the user explicitly asks to filter, pivot, map, save a query, or otherwise change Explorer and allowUiActions is true. Allowed action types are focus_country, clear_country_focus, apply_module_filter, clear_module_filters, open_map, apply_graph_query_scope, and save_and_apply_graph_query_scope.
@@ -570,6 +605,9 @@ async function main() {
       guardrailMetrics.citationsAcceptedFromNativeWeb,
     sourcesRemovedWithoutEvidence:
       guardrailMetrics.citationsRemovedNoEvidence,
+    mediaAccepted: guardrailMetrics.mediaAccepted,
+    mediaRemoved: guardrailMetrics.mediaReceived - guardrailMetrics.mediaAccepted,
+    mediaRemovedWithoutEvidenceOrSafety: guardrailMetrics.mediaRemovedNoEvidence,
     nativeWebSearchesCompleted,
     entityActionsReplaced: guardrailMetrics.entityActionsReplaced,
     explorerActionsAccepted: guardrailMetrics.explorerActionsAccepted,

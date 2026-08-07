@@ -36,6 +36,16 @@ test("evidence and history can never become instruction authority", () => {
   assert.doesNotMatch(runner, /workspaceId: input\\.clientId/);
 });
 
+test("rich media is public, provenance-bound, and never face-inferred", () => {
+  assert.match(runner, /Discover media dynamically during the current investigation/);
+  assert.match(runner, /never rely on a fixed person list, camera catalogue, or hard-coded feed/);
+  assert.match(runner, /Use media opportunistically when it makes the investigation materially clearer/);
+  assert.match(runner, /Each media\.sourceUrl must be a citation inspected in this turn/);
+  assert.match(runner, /Never infer identity from a face/);
+  assert.match(runner, /authenticated\/private camera feeds/);
+  assert.match(runner, /required: \["finalResponse", "entities", "citations", "media", "actions", "followUps"\]/);
+});
+
 test("runtime activity never forwards model reasoning text", () => {
   assert.match(runner, /activity stream never exposes model reasoning or hidden chain-of-thought/);
   assert.doesNotMatch(runner, /summary: bounded\(item\.text/);

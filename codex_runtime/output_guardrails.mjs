@@ -3,6 +3,7 @@ import { redactSensitiveTextWithCount } from "./sensitive_text.mjs";
 const MAX_FINAL_RESPONSE_CHARS = 60000;
 const MAX_ENTITY_ITEMS = 100;
 const MAX_CITATION_ITEMS = 100;
+const MAX_MEDIA_ITEMS = 12;
 const MAX_GRAPH_EVIDENCE_CITATIONS = 6;
 const ALLOWED_EXPLORER_ACTIONS = new Set([
   "focus_country",
@@ -350,6 +351,83 @@ function normalizeCitation(candidate, index) {
   };
 }
 
+function youtubeVideoId(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return "";
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  const id = hostname === "youtu.be"
+    ? segments[0] || ""
+    : ["youtube.com", "m.youtube.com"].includes(hostname)
+      ? parsed.pathname === "/watch"
+        ? parsed.searchParams.get("v") || ""
+        : ["embed", "live", "shorts"].includes(segments[0] || "")
+          ? segments[1] || ""
+          : ""
+      : "";
+  return /^[A-Za-z0-9_-]{6,20}$/.test(id) ? id : "";
+}
+
+function safePublicMediaUrl(value) {
+  const url = safePublicUrl(value);
+  if (!url) return "";
+  try {
+    return new URL(url).protocol === "https:" ? url : "";
+  } catch {
+    return "";
+  }
+}
+
+function normalizeMedia(candidate, index, citationUrls) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+  const kind = cleanText(candidate.kind, 20, { singleLine: true }).toLowerCase();
+  const category = cleanText(candidate.category, 30, { singleLine: true }).toLowerCase();
+  const title = cleanText(candidate.title, 240, { singleLine: true });
+  const url = safePublicMediaUrl(candidate.url);
+  const sourceUrl = safePublicMediaUrl(candidate.sourceUrl);
+  if (
+    !["image", "youtube", "video"].includes(kind) ||
+    !["person", "live_camera", "evidence"].includes(category) ||
+    !title ||
+    suspiciousInstructionText(title) ||
+    !url ||
+    !sourceUrl ||
+    !citationUrls.has(sourceUrl)
+  ) {
+    return null;
+  }
+  if (kind === "youtube" && !youtubeVideoId(url)) return null;
+  if (kind === "video") {
+    let pathname = "";
+    try {
+      pathname = new URL(url).pathname;
+    } catch {
+      return null;
+    }
+    if (!/\.(?:m3u8|mp4|webm)$/i.test(pathname)) return null;
+  }
+  if (category === "person" && kind !== "image") return null;
+  if (category === "live_camera" && !["youtube", "video"].includes(kind)) return null;
+  const sourceName = cleanText(candidate.sourceName, 160, { singleLine: true });
+  return {
+    id: cleanIdentifier(candidate.id, 160) || `media-${index + 1}`,
+    kind,
+    category,
+    title,
+    url,
+    sourceUrl,
+    thumbnailUrl: safePublicMediaUrl(candidate.thumbnailUrl) || null,
+    sourceName:
+      sourceName && !suspiciousInstructionText(sourceName) ? sourceName : null,
+    caption: cleanText(candidate.caption, 800, { singleLine: true }) || null,
+    live: category === "live_camera" && candidate.live === true,
+  };
+}
+
 function safeEntityAction(entity) {
   const reference = entity.graphRef || entity.id;
   const quotedLabel = entity.label.replaceAll('"', "'");
@@ -491,6 +569,7 @@ export function normalizeStructuredResult(
         finalResponse: cleanText(raw, MAX_FINAL_RESPONSE_CHARS),
         entities: [],
         citations: [],
+        media: [],
         actions: [],
         followUps: [],
       },
@@ -505,6 +584,9 @@ export function normalizeStructuredResult(
         citationsAcceptedFromNativeWeb: 0,
         citationsAddedFromGraphEvidence: 0,
         citationsRemovedNoEvidence: 0,
+        mediaReceived: 0,
+        mediaAccepted: 0,
+        mediaRemovedNoEvidence: 0,
         entityActionsReplaced: 0,
         explorerActionsReceived: 0,
         explorerActionsAccepted: 0,
@@ -623,6 +705,19 @@ export function normalizeStructuredResult(
     citationsAcceptedFromToolEvidence += 1;
     citationsAddedFromGraphEvidence += 1;
   }
+  const rawMedia = Array.isArray(parsed.media)
+    ? parsed.media.slice(0, MAX_MEDIA_ITEMS)
+    : [];
+  const media = [];
+  const mediaKeys = new Set();
+  for (const [index, candidate] of rawMedia.entries()) {
+    const normalized = normalizeMedia(candidate, index, citationUrls);
+    if (!normalized) continue;
+    const key = `${normalized.kind}\u0000${normalized.url}`;
+    if (mediaKeys.has(key)) continue;
+    mediaKeys.add(key);
+    media.push(normalized);
+  }
   const rawActions = Array.isArray(parsed.actions) ? parsed.actions.slice(0, 4) : [];
   const actions = allowUiActions
     ? rawActions.map(normalizeExplorerAction).filter(Boolean).slice(0, 4)
@@ -633,6 +728,7 @@ export function normalizeStructuredResult(
       finalResponse: cleanText(parsed.finalResponse, MAX_FINAL_RESPONSE_CHARS),
       entities,
       citations,
+      media,
       actions,
       followUps: Array.isArray(parsed.followUps)
         ? parsed.followUps
@@ -653,6 +749,9 @@ export function normalizeStructuredResult(
       citationsAddedFromGraphEvidence,
       citationsRemovedNoEvidence:
         Math.max(0, citationsUrlSafe - modelCitationsAccepted),
+      mediaReceived: rawMedia.length,
+      mediaAccepted: media.length,
+      mediaRemovedNoEvidence: Math.max(0, rawMedia.length - media.length),
       entityActionsReplaced: entities.length,
       explorerActionsReceived: rawActions.length,
       explorerActionsAccepted: actions.length,

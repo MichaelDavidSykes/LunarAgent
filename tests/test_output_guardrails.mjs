@@ -217,6 +217,116 @@ test("citations fail closed without completed web search or matching tool eviden
   assert.equal(webSearched.metrics.citationsAcceptedFromToolEvidence, 0);
 });
 
+test("person portraits and public camera previews require a cited public source", () => {
+  const { result, metrics } = normalizeStructuredResult(JSON.stringify({
+    finalResponse: "Grounded visual response.",
+    entities: [],
+    citations: [
+      { id: "person-source", title: "Public profile", url: "https://profiles.example.test/alex" },
+      { id: "camera-source", title: "Public camera", url: "https://cameras.example.test/harbour" },
+    ],
+    media: [
+      {
+        id: "person-alex",
+        kind: "image",
+        category: "person",
+        title: "Alex Example",
+        url: "https://images.example.test/alex.jpg",
+        sourceUrl: "https://profiles.example.test/alex#portrait",
+        thumbnailUrl: null,
+        sourceName: "Example Profiles",
+        caption: "Publicly identified profile portrait.",
+        live: false,
+      },
+      {
+        id: "harbour-camera",
+        kind: "youtube",
+        category: "live_camera",
+        title: "Harbour public camera",
+        url: "https://www.youtube.com/watch?v=abcdefghijk",
+        sourceUrl: "https://cameras.example.test/harbour",
+        thumbnailUrl: "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg",
+        sourceName: "Harbour Authority",
+        caption: "Public feed listed by the harbour authority.",
+        live: true,
+      },
+    ],
+    actions: [],
+    followUps: [],
+  }), { nativeWebSearchCompleted: true });
+
+  assert.deepEqual(result.media.map((item) => [item.id, item.category, item.sourceUrl]), [
+    ["person-alex", "person", "https://profiles.example.test/alex"],
+    ["harbour-camera", "live_camera", "https://cameras.example.test/harbour"],
+  ]);
+  assert.equal(result.media[1].live, true);
+  assert.equal(metrics.mediaReceived, 2);
+  assert.equal(metrics.mediaAccepted, 2);
+  assert.equal(metrics.mediaRemovedNoEvidence, 0);
+});
+
+test("media guardrails reject uncited, private, mismatched, and unplayable cards", () => {
+  const sourceUrl = "https://cameras.example.test/public";
+  const media = [
+    {
+      id: "uncited",
+      kind: "image",
+      category: "person",
+      title: "Uncited person",
+      url: "https://images.example.test/person.jpg",
+      sourceUrl: "https://profiles.example.test/uncited",
+    },
+    {
+      id: "private",
+      kind: "video",
+      category: "live_camera",
+      title: "Private feed",
+      url: "https://127.0.0.1/live.m3u8",
+      sourceUrl,
+      live: true,
+    },
+    {
+      id: "person-video",
+      kind: "video",
+      category: "person",
+      title: "Wrong media kind",
+      url: "https://media.example.test/person.mp4",
+      sourceUrl,
+    },
+    {
+      id: "camera-page",
+      kind: "video",
+      category: "live_camera",
+      title: "Not a direct stream",
+      url: "https://media.example.test/camera",
+      sourceUrl,
+      live: true,
+    },
+    {
+      id: "youtube-channel",
+      kind: "youtube",
+      category: "live_camera",
+      title: "Channel is not an embeddable video",
+      url: "https://www.youtube.com/@example/live",
+      sourceUrl,
+      live: true,
+    },
+  ];
+  const { result, metrics } = normalizeStructuredResult(JSON.stringify({
+    finalResponse: "No safe media.",
+    entities: [],
+    citations: [{ id: "camera", title: "Public camera", url: sourceUrl }],
+    media,
+    actions: [],
+    followUps: [],
+  }), { nativeWebSearchCompleted: true });
+
+  assert.deepEqual(result.media, []);
+  assert.equal(metrics.mediaReceived, media.length);
+  assert.equal(metrics.mediaAccepted, 0);
+  assert.equal(metrics.mediaRemovedNoEvidence, media.length);
+});
+
 test("tool evidence URL collection reads only explicit bounded source-link fields", () => {
   const evidence = {
     reports: [

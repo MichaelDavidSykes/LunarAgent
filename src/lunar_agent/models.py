@@ -100,6 +100,7 @@ class ExplorerAgentRespondResponse(BaseModel):
     codexThreadId: str | None = Field(default=None, max_length=180)
     entities: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
     citations: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    media: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
 
 
 class ExplorerAgentCancelRequest(BaseModel):

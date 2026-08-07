@@ -146,8 +146,10 @@ Output:
 and mounted ChatGPT-managed Codex authentication. Readiness runs the official
 `codex login status` check and accepts only the ChatGPT login method, never an
 API-key login. If a turn reports an authentication failure, readiness stays
-fail-closed for that credential-file generation until Codex authentication is
-reconnected or rotated; a short probe cache prevents a process launch per
+fail-closed during a bounded cooldown, then safely rechecks the official Codex
+login status so automatically recovered ChatGPT sessions do not leave the
+service permanently unavailable. Rotating the credential file bypasses the
+cooldown immediately. A short probe cache prevents a process launch per
 concurrent health request.
 
 ## Environment
