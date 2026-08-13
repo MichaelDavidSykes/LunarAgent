@@ -2707,7 +2707,11 @@ def normalize_safe_route_area_risk_payload(
                 safe_evidence_urls.append(safe_url)
         if not safe_evidence_urls:
             continue
-        dated_evidence: list[dict[str, str]] = []
+        dated_evidence: list[dict[str, str]] = [
+            {"url": evidence_url, "published_at": authoritative_dates[evidence_url]}
+            for evidence_url in safe_evidence_urls
+            if authoritative_dates.get(evidence_url)
+        ][:8]
         raw_evidence = raw_zone.get("evidence") or raw_zone.get("source_evidence") or []
         for item in raw_evidence if isinstance(raw_evidence, list) else []:
             if not isinstance(item, dict):

@@ -1982,9 +1982,20 @@ def test_area_risk_evidence_date_is_strict_and_supplied_date_is_authoritative():
         max_zones=1,
         verified_source_urls={verified_url},
     )
+    supplied = service_module.normalize_safe_route_area_risk_payload(
+        {"zones": [{**model_zone, "evidence": []}]},
+        max_zones=1,
+        verified_source_urls={verified_url},
+        authoritative_evidence=[
+            {"url": verified_url, "published_at": "2026-08-09"}
+        ],
+    )
 
     assert stale["zones"][0]["evidence"] == []
     assert malformed["zones"][0]["evidence"] == []
+    assert supplied["zones"][0]["evidence"] == [
+        {"url": verified_url, "published_at": "2026-08-09T00:00:00Z"}
+    ]
 
 
 def test_area_risk_normalization_preserves_verified_named_zone_for_downstream_geocoding():

@@ -27,6 +27,8 @@ if (
 const MAX_PROMPT_CHARS = 48_000;
 const MAX_ZONES = 6;
 const MAX_ZONE_RADIUS_M = 2_500;
+const MAX_EVIDENCE_AGE_MS = 365 * 24 * 60 * 60 * 1000;
+const MAX_FUTURE_EVIDENCE_SKEW_MS = 2 * 24 * 60 * 60 * 1000;
 const ALLOWED_RESULT_ITEM_TYPES = new Set([
   "agent_message",
   "reasoning",
@@ -54,6 +56,18 @@ function configPathKey(value) {
     throw new Error("Area-risk Codex permission paths must be absolute aliases without dotted components");
   }
   return path;
+}
+
+function canonicalEvidenceDate(value, nowMs = Date.now()) {
+  const raw = String(value || "").trim();
+  if (!raw || !/^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(raw)) return "";
+  const timestamp = Date.parse(raw);
+  if (
+    !Number.isFinite(timestamp) ||
+    timestamp < nowMs - MAX_EVIDENCE_AGE_MS ||
+    timestamp > nowMs + MAX_FUTURE_EVIDENCE_SKEW_MS
+  ) return "";
+  return new Date(timestamp).toISOString();
 }
 
 function outputSchema(maxZones) {
@@ -247,7 +261,7 @@ async function main() {
     const evidence = [];
     for (const item of Array.isArray(zone.evidence) ? zone.evidence : []) {
       const url = safePublicUrl(item?.url);
-      const published_at = String(item?.published_at || "").trim().slice(0, 80);
+      const published_at = canonicalEvidenceDate(item?.published_at);
       if (
         url &&
         evidence_urls.includes(url) &&
