@@ -1920,6 +1920,73 @@ def test_area_risk_normalization_enforces_aoi_and_verified_sources():
     assert [zone["label"] for zone in payload["zones"]] == ["Inside AOI"]
 
 
+def test_area_risk_normalization_preserves_only_dated_verified_zone_evidence():
+    verified_url = "https://police.example.test/brixton"
+    payload = service_module.normalize_safe_route_area_risk_payload(
+        {
+            "zones": [
+                {
+                    "label": "Brixton",
+                    "lat": 51.4627,
+                    "lon": -0.1145,
+                    "radius_m": 1200,
+                    "evidence_urls": [verified_url],
+                    "evidence": [
+                        {"url": verified_url, "published_at": "2026-08-10"},
+                        {"url": "https://unverified.example/story", "published_at": "2026-08-11"},
+                        {"url": verified_url, "published_at": ""},
+                    ],
+                }
+            ]
+        },
+        max_zones=3,
+        aoi={"bounds": {"minLat": 51.4, "minLon": -0.3, "maxLat": 51.6, "maxLon": -0.05}},
+        verified_source_urls={verified_url},
+    )
+
+    assert payload["zones"][0]["evidence"] == [
+        {"url": verified_url, "published_at": "2026-08-10T00:00:00Z"}
+    ]
+
+
+def test_area_risk_evidence_date_is_strict_and_supplied_date_is_authoritative():
+    verified_url = "https://police.example.test/brixton"
+    model_zone = {
+        "label": "Brixton",
+        "lat": 51.4627,
+        "lon": -0.1145,
+        "radius_m": 1200,
+        "evidence_urls": [verified_url],
+        "evidence": [{"url": verified_url, "published_at": "2026-08-10"}],
+    }
+
+    stale = service_module.normalize_safe_route_area_risk_payload(
+        {"zones": [model_zone]},
+        max_zones=1,
+        verified_source_urls={verified_url},
+        authoritative_evidence=[{"url": verified_url, "published_at": "2024-01-01"}],
+    )
+    malformed = service_module.normalize_safe_route_area_risk_payload(
+        {
+            "zones": [
+                {
+                    **model_zone,
+                    "evidence": [
+                        {"url": verified_url, "published_at": "not-a-date"},
+                        {"url": "http://127.0.0.1/private", "published_at": "2026-08-10"},
+                        {"url": verified_url, "published_at": "2099-01-01"},
+                    ],
+                }
+            ]
+        },
+        max_zones=1,
+        verified_source_urls={verified_url},
+    )
+
+    assert stale["zones"][0]["evidence"] == []
+    assert malformed["zones"][0]["evidence"] == []
+
+
 def test_area_risk_normalization_preserves_verified_named_zone_for_downstream_geocoding():
     payload = service_module.normalize_safe_route_area_risk_payload(
         {
@@ -2257,6 +2324,12 @@ def test_area_risk_codex_web_sources_require_completed_search_marker(monkeypatch
                     "icon": "warning",
                     "notes": "Recurring robbery reports affect public route safety.",
                     "evidence_urls": ["https://police.example.test/brixton"],
+                    "evidence": [
+                        {
+                            "url": "https://police.example.test/brixton",
+                            "published_at": "2026-08-10",
+                        }
+                    ],
                 }
             ],
         }
@@ -2280,6 +2353,12 @@ def test_area_risk_codex_web_sources_require_completed_search_marker(monkeypatch
 
     assert [zone["label"] for zone in result["zones"]] == ["Brixton"]
     assert result["zones"][0]["evidence_urls"] == ["https://police.example.test/brixton"]
+    assert result["zones"][0]["evidence"] == [
+        {
+            "url": "https://police.example.test/brixton",
+            "published_at": "2026-08-10T00:00:00Z",
+        }
+    ]
 
 
 def test_area_risk_codex_web_result_can_defer_verified_named_zone_geocoding(monkeypatch):

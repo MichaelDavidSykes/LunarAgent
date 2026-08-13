@@ -106,6 +106,19 @@ function outputSchema(maxZones) {
               maxItems: 8,
               items: { type: "string" },
             },
+            evidence: {
+              type: "array",
+              maxItems: 8,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  url: { type: "string" },
+                  published_at: { type: "string" },
+                },
+                required: ["url", "published_at"],
+              },
+            },
           },
           required: [
             "label",
@@ -120,6 +133,7 @@ function outputSchema(maxZones) {
             "icon",
             "notes",
             "evidence_urls",
+            "evidence",
           ],
         },
       },
@@ -226,12 +240,26 @@ async function main() {
     ? [...new Set(result.verifiedSourceUrls.map(safePublicUrl).filter(Boolean))].slice(0, 24)
     : [];
   const allowedEvidenceUrls = new Set([...suppliedEvidenceUrls, ...verifiedSourceUrls]);
-  const zones = result.zones.slice(0, maxZones).map((zone) => ({
-    ...zone,
-    evidence_urls: [...new Set((zone.evidence_urls || []).map(safePublicUrl).filter(
+  const zones = result.zones.slice(0, maxZones).map((zone) => {
+    const evidence_urls = [...new Set((zone.evidence_urls || []).map(safePublicUrl).filter(
       (url) => url && allowedEvidenceUrls.has(url),
-    ))].slice(0, 8),
-  })).filter((zone) => zone.evidence_urls.length > 0);
+    ))].slice(0, 8);
+    const evidence = [];
+    for (const item of Array.isArray(zone.evidence) ? zone.evidence : []) {
+      const url = safePublicUrl(item?.url);
+      const published_at = String(item?.published_at || "").trim().slice(0, 80);
+      if (
+        url &&
+        evidence_urls.includes(url) &&
+        published_at &&
+        !evidence.some((existing) => existing.url === url)
+      ) {
+        evidence.push({ url, published_at });
+      }
+      if (evidence.length >= 8) break;
+    }
+    return { ...zone, evidence_urls, evidence };
+  }).filter((zone) => zone.evidence_urls.length > 0);
   process.stdout.write(`${JSON.stringify({
     zones,
     notes: result.notes.slice(0, 1000),

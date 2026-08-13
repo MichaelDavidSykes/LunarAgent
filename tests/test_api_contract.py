@@ -123,6 +123,47 @@ def test_threatscape_query_risk_alias_uses_area_risk_research(monkeypatch):
     assert response.json()["zones"] == [{"label": "Johannesburg"}]
 
 
+def test_area_risk_endpoint_preserves_dated_zone_evidence(monkeypatch):
+    async def fake_research_safe_route_area_risk(**_kwargs):
+        return {
+            "zones": [
+                {
+                    "label": "Brixton",
+                    "evidence_urls": ["https://police.example.test/brixton"],
+                    "evidence": [
+                        {
+                            "url": "https://police.example.test/brixton",
+                            "published_at": "2026-08-10T00:00:00Z",
+                        }
+                    ],
+                }
+            ],
+            "model": "test-model",
+            "notes": "ok",
+        }
+
+    monkeypatch.setattr(main_module, "research_safe_route_area_risk", fake_research_safe_route_area_risk)
+    client = _authenticated_client(monkeypatch)
+
+    response = client.post(
+        "/v1/safe-route/area-risk/research",
+        json={
+            "sessionId": "session-1",
+            "aoi": {"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
+            "evidence": [],
+            "maxZones": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["zones"][0]["evidence"] == [
+        {
+            "url": "https://police.example.test/brixton",
+            "published_at": "2026-08-10T00:00:00Z",
+        }
+    ]
+
+
 def test_agent_routes_fail_closed_when_shared_token_is_unconfigured(monkeypatch):
     monkeypatch.setattr(main_module.settings, "shared_token", "")
     client = TestClient(main_module.app)
