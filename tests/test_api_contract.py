@@ -123,6 +123,41 @@ def test_threatscape_query_risk_alias_uses_area_risk_research(monkeypatch):
     assert response.json()["zones"] == [{"label": "Johannesburg"}]
 
 
+def test_area_risk_endpoint_marks_only_exact_interactive_route_workload(monkeypatch):
+    captured: list[bool] = []
+
+    async def fake_research_safe_route_area_risk(**kwargs):
+        captured.append(kwargs["interactive_route"])
+        return {"zones": [], "model": "test-model", "notes": "ok"}
+
+    monkeypatch.setattr(
+        main_module,
+        "research_safe_route_area_risk",
+        fake_research_safe_route_area_risk,
+    )
+    client = _authenticated_client(monkeypatch)
+    request_body = {
+        "aoi": {"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
+        "evidence": [],
+        "maxZones": 2,
+    }
+
+    interactive = client.post(
+        "/v1/safe-route/area-risk/research",
+        headers={"X-Lunar-Area-Risk-Workload": "interactive-route"},
+        json=request_body,
+    )
+    background = client.post(
+        "/v1/safe-route/area-risk/research",
+        headers={"X-Lunar-Area-Risk-Workload": "global-batch"},
+        json=request_body,
+    )
+
+    assert interactive.status_code == 200
+    assert background.status_code == 200
+    assert captured == [True, False]
+
+
 def test_area_risk_endpoint_preserves_dated_zone_evidence(monkeypatch):
     async def fake_research_safe_route_area_risk(**_kwargs):
         return {

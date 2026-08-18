@@ -250,7 +250,13 @@ async def explorer_agent_cancel(
     dependencies=[Depends(require_token)],
     name="safe_route_area_risk_research",
 )
-async def safe_route_area_risk_research(request: SafeRouteAreaRiskResearchRequest) -> SafeRouteAreaRiskResearchResponse:
+async def safe_route_area_risk_research(
+    request: SafeRouteAreaRiskResearchRequest,
+    area_risk_workload: str | None = Header(
+        default=None,
+        alias="X-Lunar-Area-Risk-Workload",
+    ),
+) -> SafeRouteAreaRiskResearchResponse:
     try:
         await enforce_request_quota("area-risk", "safe-route")
         async with _request_semaphore:
@@ -258,6 +264,10 @@ async def safe_route_area_risk_research(request: SafeRouteAreaRiskResearchReques
                 aoi=request.aoi,
                 evidence=request.evidence,
                 max_zones=request.maxZones,
+                interactive_route=(
+                    str(area_risk_workload or "").strip().casefold()
+                    == "interactive-route"
+                ),
             )
         return SafeRouteAreaRiskResearchResponse(**payload)
     except HTTPException:

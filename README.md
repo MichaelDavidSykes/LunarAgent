@@ -173,6 +173,9 @@ Optional:
 - `LUNAR_AGENT_BACKEND_HTTP_TIMEOUT`
 - `LUNAR_AGENT_AREA_RISK_PROVIDER_MODE` (default `chatgpt-account`; set to
   `openai-api` only when API billing is intentionally enabled)
+- `LUNAR_AGENT_AREA_RISK_CODEX_INTERACTIVE_MAX_CONCURRENT_REQUESTS` (default
+  `2`, capped at `4`; hard ceiling for route-critical area-risk runners while
+  unmarked background/global research remains serialized)
 - `LUNAR_AGENT_AREA_RISK_ACCOUNT_ENABLED` (default `true`; allows the primary
   ChatGPT-managed account provider)
 - `LUNAR_AGENT_AREA_RISK_MODEL` (default `gpt-5.1`; API mode only)

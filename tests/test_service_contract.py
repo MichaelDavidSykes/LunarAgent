@@ -2177,6 +2177,29 @@ def test_area_risk_account_mode_uses_ai_before_any_api_path(monkeypatch):
     assert result["notes"] == "AI rejected broad article wording and found the named locality."
 
 
+def test_area_risk_account_mode_forwards_interactive_route_capacity_hint(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_provider_mode", "chatgpt-account")
+    captured: dict[str, object] = {}
+
+    async def account_analysis(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"model": "gpt-5.6-sol", "notes": "ok", "zones": []}
+
+    monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", account_analysis)
+
+    result = asyncio.run(
+        service_module.research_safe_route_area_risk(
+            aoi={"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
+            evidence=[],
+            max_zones=2,
+            interactive_route=True,
+        )
+    )
+
+    assert result["zones"] == []
+    assert captured["interactive_route"] is True
+
+
 def test_area_risk_empty_web_result_does_not_double_call_model(monkeypatch):
     monkeypatch.setattr(service_module.settings, "area_risk_provider_mode", "openai-api")
     monkeypatch.setattr(service_module.settings, "area_risk_web_research_enabled", True)

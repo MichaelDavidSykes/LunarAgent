@@ -2859,6 +2859,7 @@ async def research_safe_route_area_risk(
     aoi: dict[str, Any],
     evidence: list[dict[str, Any]],
     max_zones: int = 8,
+    interactive_route: bool = False,
 ) -> dict[str, Any]:
     bounded_max_zones = _bounded_area_risk_max_zones(max_zones)
     seed_evidence_urls = {
@@ -2873,6 +2874,7 @@ async def research_safe_route_area_risk(
             evidence=evidence,
             max_zones=bounded_max_zones,
             seed_evidence_urls=seed_evidence_urls,
+            interactive_route=interactive_route,
         )
     if settings.area_risk_provider_mode == "openai-api":
         return await _research_area_risk_with_openai_api(
@@ -2890,16 +2892,22 @@ async def _research_area_risk_with_codex_account(
     evidence: list[dict[str, Any]],
     max_zones: int,
     seed_evidence_urls: set[str],
+    interactive_route: bool = False,
 ) -> dict[str, Any]:
     try:
+        codex_options: dict[str, Any] = {
+            "max_zones": max_zones,
+            "evidence_urls": seed_evidence_urls,
+        }
+        if interactive_route:
+            codex_options["interactive_route"] = True
         codex_payload = await run_area_risk_codex_analysis(
             build_safe_route_area_risk_codex_prompt(
                 aoi=aoi,
                 evidence=evidence,
                 max_zones=max_zones,
             ),
-            max_zones=max_zones,
-            evidence_urls=seed_evidence_urls,
+            **codex_options,
         )
     except Exception as exc:
         logger.warning(

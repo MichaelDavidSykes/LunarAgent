@@ -307,6 +307,67 @@ def test_area_risk_codex_analysis_rejects_non_chatgpt_auth(
     assert exc_info.value.code == "codex_auth_unavailable"
 
 
+def test_area_risk_codex_capacity_allows_two_interactive_but_serializes_default(
+    monkeypatch,
+):
+    async def peak_concurrency(workloads: list[bool]) -> int:
+        active = 0
+        peak = 0
+
+        async def occupy(interactive_route: bool) -> None:
+            nonlocal active, peak
+            async with codex_module._area_risk_codex_capacity(
+                interactive_route=interactive_route,
+            ):
+                active += 1
+                peak = max(peak, active)
+                await asyncio.sleep(0.02)
+                active -= 1
+
+        await asyncio.gather(*(occupy(workload) for workload in workloads))
+        return peak
+
+    async def exercise() -> tuple[int, int, int]:
+        monkeypatch.setattr(
+            codex_module,
+            "_area_risk_codex_global_semaphore",
+            asyncio.Semaphore(2),
+        )
+        monkeypatch.setattr(
+            codex_module,
+            "_area_risk_codex_default_semaphore",
+            asyncio.Semaphore(1),
+        )
+        interactive_peak = await peak_concurrency([True, True])
+
+        monkeypatch.setattr(
+            codex_module,
+            "_area_risk_codex_global_semaphore",
+            asyncio.Semaphore(2),
+        )
+        monkeypatch.setattr(
+            codex_module,
+            "_area_risk_codex_default_semaphore",
+            asyncio.Semaphore(1),
+        )
+        default_peak = await peak_concurrency([False, False])
+
+        monkeypatch.setattr(
+            codex_module,
+            "_area_risk_codex_global_semaphore",
+            asyncio.Semaphore(2),
+        )
+        monkeypatch.setattr(
+            codex_module,
+            "_area_risk_codex_default_semaphore",
+            asyncio.Semaphore(1),
+        )
+        global_peak = await peak_concurrency([True, True, False])
+        return interactive_peak, default_peak, global_peak
+
+    assert asyncio.run(exercise()) == (2, 1, 2)
+
+
 def _request() -> ExplorerAgentRespondRequest:
     return ExplorerAgentRespondRequest(
         sessionId="explorer-session-1",

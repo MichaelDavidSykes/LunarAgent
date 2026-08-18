@@ -10,6 +10,7 @@ import signal
 import shutil
 import subprocess
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -73,7 +74,16 @@ _codex_auth_failure_fingerprint: tuple[int, int, int] | None = None
 _codex_auth_failure_retry_at = 0.0
 _codex_auth_probe_cache: tuple[tuple[int, int, int], str | None, float] | None = None
 _CODEX_AUTH_FAILURE_RECHECK_SECONDS = 60.0
-_area_risk_codex_semaphore = asyncio.Semaphore(1)
+_area_risk_codex_global_semaphore = asyncio.Semaphore(
+    max(
+        1,
+        min(
+            int(settings.area_risk_codex_interactive_max_concurrent_requests or 2),
+            4,
+        ),
+    )
+)
+_area_risk_codex_default_semaphore = asyncio.Semaphore(1)
 _MAX_AREA_RISK_RUNNER_OUTPUT_BYTES = 256_000
 
 
@@ -81,6 +91,26 @@ class ExplorerCodexRuntimeError(RuntimeError):
     def __init__(self, code: str):
         self.code = code if code in _SAFE_FAILURE_MESSAGES else "runtime_unavailable"
         super().__init__(_SAFE_FAILURE_MESSAGES[self.code])
+
+
+@asynccontextmanager
+async def _area_risk_codex_capacity(*, interactive_route: bool):
+    """Keep background research serial while allowing bounded route-critical work."""
+    lane = (
+        _area_risk_codex_global_semaphore
+        if interactive_route
+        else _area_risk_codex_default_semaphore
+    )
+    if interactive_route:
+        async with lane:
+            yield
+        return
+
+    # Acquire the serial lane first so a queued background job cannot reserve
+    # scarce global capacity while route-critical work is still running.
+    async with lane:
+        async with _area_risk_codex_global_semaphore:
+            yield
 
 
 def _request_fingerprint(value: str | None) -> str:
@@ -431,6 +461,7 @@ async def run_area_risk_codex_analysis(
     *,
     max_zones: int,
     evidence_urls: set[str] | None = None,
+    interactive_route: bool = False,
 ) -> dict[str, Any]:
     """Analyze bounded public area-risk evidence through ChatGPT-authenticated Codex."""
     if not settings.codex_agent_enabled or not settings.area_risk_account_enabled:
@@ -466,7 +497,7 @@ async def run_area_risk_codex_analysis(
 
     process: asyncio.subprocess.Process | None = None
     try:
-        async with _area_risk_codex_semaphore:
+        async with _area_risk_codex_capacity(interactive_route=interactive_route):
             process = await asyncio.create_subprocess_exec(
                 _node_binary(),
                 str(runner_path),

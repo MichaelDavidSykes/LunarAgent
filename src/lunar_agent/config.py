@@ -78,6 +78,10 @@ class Settings(BaseSettings):
         "LUNAR_AGENT_AREA_RISK_CODEX_TIMEOUT",
         180,
     )
+    area_risk_codex_interactive_max_concurrent_requests: int = _env_int(
+        "LUNAR_AGENT_AREA_RISK_CODEX_INTERACTIVE_MAX_CONCURRENT_REQUESTS",
+        2,
+    )
     shared_token: str = os.getenv("LUNAR_AGENT_SHARED_TOKEN", "")
     backend_base_url: str = os.getenv("LUNAR_AGENT_BACKEND_BASE_URL", "")
     backend_shared_token: str = os.getenv("LUNAR_AGENT_BACKEND_SHARED_TOKEN", "")
