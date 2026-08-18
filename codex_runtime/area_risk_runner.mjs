@@ -28,6 +28,7 @@ const MAX_PROMPT_CHARS = 48_000;
 const MAX_ZONES = 6;
 const MAX_ZONE_RADIUS_M = 2_500;
 const MAX_EVIDENCE_AGE_MS = 365 * 24 * 60 * 60 * 1000;
+const MAX_INTERACTIVE_EVIDENCE_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 const MAX_FUTURE_EVIDENCE_SKEW_MS = 2 * 24 * 60 * 60 * 1000;
 const ALLOWED_RESULT_ITEM_TYPES = new Set([
   "agent_message",
@@ -58,19 +59,27 @@ function configPathKey(value) {
   return path;
 }
 
-function canonicalEvidenceDate(value, nowMs = Date.now()) {
+function canonicalEvidenceDate(
+  value,
+  nowMs = Date.now(),
+  maxEvidenceAgeMs = MAX_EVIDENCE_AGE_MS,
+) {
   const raw = String(value || "").trim();
-  if (!raw || !/^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(raw)) return "";
-  const timestamp = Date.parse(raw);
+  const basicUtc = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(raw);
+  const normalizedRaw = basicUtc
+    ? `${basicUtc[1]}-${basicUtc[2]}-${basicUtc[3]}T${basicUtc[4]}:${basicUtc[5]}:${basicUtc[6]}Z`
+    : raw;
+  if (!normalizedRaw || !/^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(normalizedRaw)) return "";
+  const timestamp = Date.parse(normalizedRaw);
   if (
     !Number.isFinite(timestamp) ||
-    timestamp < nowMs - MAX_EVIDENCE_AGE_MS ||
+    timestamp < nowMs - maxEvidenceAgeMs ||
     timestamp > nowMs + MAX_FUTURE_EVIDENCE_SKEW_MS
   ) return "";
   return new Date(timestamp).toISOString();
 }
 
-function outputSchema(maxZones) {
+function outputSchema(maxZones, interactiveRoute = false) {
   const nullableNumber = { type: ["number", "null"] };
   return {
     type: "object",
@@ -117,11 +126,13 @@ function outputSchema(maxZones) {
             notes: { type: "string" },
             evidence_urls: {
               type: "array",
+              ...(interactiveRoute ? { minItems: 1 } : {}),
               maxItems: 8,
               items: { type: "string" },
             },
             evidence: {
               type: "array",
+              ...(interactiveRoute ? { minItems: 1 } : {}),
               maxItems: 8,
               items: {
                 type: "object",
@@ -154,7 +165,7 @@ function outputSchema(maxZones) {
       notes: { type: "string" },
       verifiedSourceUrls: {
         type: "array",
-        maxItems: 24,
+        maxItems: interactiveRoute ? 0 : 24,
         items: { type: "string" },
       },
     },
@@ -177,6 +188,35 @@ async function main() {
     throw new Error("Invalid area-risk Codex reasoning effort");
   }
   const maxZones = Math.max(1, Math.min(Number(input.maxZones) || MAX_ZONES, MAX_ZONES));
+  const interactiveRoute = input.interactiveRoute === true;
+  const suppliedEvidenceUrls = new Set(
+    (Array.isArray(input.evidenceUrls) ? input.evidenceUrls : [])
+      .map(safePublicUrl)
+      .filter(Boolean),
+  );
+  const authoritativeEvidenceByUrl = new Map();
+  const evidenceNowMs = Date.now();
+  for (const item of Array.isArray(input.authoritativeEvidence)
+    ? input.authoritativeEvidence
+    : []) {
+    const url = safePublicUrl(item?.url);
+    const publishedAt = canonicalEvidenceDate(
+      item?.publishedAt,
+      evidenceNowMs,
+      MAX_INTERACTIVE_EVIDENCE_AGE_MS,
+    );
+    if (
+      url &&
+      suppliedEvidenceUrls.has(url) &&
+      publishedAt &&
+      !authoritativeEvidenceByUrl.has(url)
+    ) {
+      authoritativeEvidenceByUrl.set(url, publishedAt);
+    }
+  }
+  if (interactiveRoute && authoritativeEvidenceByUrl.size === 0) {
+    throw new Error("Interactive area-risk analysis requires recent authoritative evidence");
+  }
 
   const codexEnv = {
     PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
@@ -216,13 +256,13 @@ async function main() {
     modelReasoningEffort: reasoningEffort,
     workingDirectory: workspace,
     skipGitRepoCheck: true,
-    webSearchMode: "live",
+    webSearchMode: interactiveRoute ? "disabled" : "live",
     approvalPolicy: "never",
     sandboxMode: EXECUTION_POLICY.sandboxMode,
     networkAccessEnabled: EXECUTION_POLICY.networkAccessEnabled,
   });
   const turn = await thread.run(prompt, {
-    outputSchema: outputSchema(maxZones),
+    outputSchema: outputSchema(maxZones, interactiveRoute),
   });
   let webSearchCompleted = false;
   for (const item of turn.items || []) {
@@ -230,6 +270,9 @@ async function main() {
       throw new Error(`Area-risk Codex emitted a forbidden item type: ${String(item?.type || "unknown")}`);
     }
     if (item?.type === "web_search") webSearchCompleted = true;
+  }
+  if (interactiveRoute && webSearchCompleted) {
+    throw new Error("Interactive area-risk analysis unexpectedly used live web search");
   }
   let result;
   try {
@@ -245,35 +288,46 @@ async function main() {
   ) {
     throw new Error("Area-risk Codex returned an invalid structured payload");
   }
-  const suppliedEvidenceUrls = new Set(
-    (Array.isArray(input.evidenceUrls) ? input.evidenceUrls : [])
-      .map(safePublicUrl)
-      .filter(Boolean),
-  );
   const verifiedSourceUrls = webSearchCompleted
     ? [...new Set(result.verifiedSourceUrls.map(safePublicUrl).filter(Boolean))].slice(0, 24)
     : [];
-  const allowedEvidenceUrls = new Set([...suppliedEvidenceUrls, ...verifiedSourceUrls]);
+  const allowedEvidenceUrls = interactiveRoute
+    ? new Set(authoritativeEvidenceByUrl.keys())
+    : new Set([...suppliedEvidenceUrls, ...verifiedSourceUrls]);
+  let invalidInteractiveZone = false;
   const zones = result.zones.slice(0, maxZones).map((zone) => {
     const evidence_urls = [...new Set((zone.evidence_urls || []).map(safePublicUrl).filter(
       (url) => url && allowedEvidenceUrls.has(url),
     ))].slice(0, 8);
-    const evidence = [];
-    for (const item of Array.isArray(zone.evidence) ? zone.evidence : []) {
-      const url = safePublicUrl(item?.url);
-      const published_at = canonicalEvidenceDate(item?.published_at);
-      if (
-        url &&
-        evidence_urls.includes(url) &&
-        published_at &&
-        !evidence.some((existing) => existing.url === url)
-      ) {
-        evidence.push({ url, published_at });
+    const evidence = interactiveRoute
+      ? evidence_urls.map((url) => ({
+          url,
+          published_at: authoritativeEvidenceByUrl.get(url),
+        }))
+      : [];
+    if (!interactiveRoute) {
+      for (const item of Array.isArray(zone.evidence) ? zone.evidence : []) {
+        const url = safePublicUrl(item?.url);
+        const published_at = canonicalEvidenceDate(item?.published_at);
+        if (
+          url &&
+          evidence_urls.includes(url) &&
+          published_at &&
+          !evidence.some((existing) => existing.url === url)
+        ) {
+          evidence.push({ url, published_at });
+        }
+        if (evidence.length >= 8) break;
       }
-      if (evidence.length >= 8) break;
+    }
+    if (interactiveRoute && (evidence_urls.length === 0 || evidence.length === 0)) {
+      invalidInteractiveZone = true;
     }
     return { ...zone, evidence_urls, evidence };
   }).filter((zone) => zone.evidence_urls.length > 0);
+  if (interactiveRoute && invalidInteractiveZone) {
+    throw new Error("Interactive area-risk result lacked recent authoritative evidence");
+  }
   process.stdout.write(`${JSON.stringify({
     zones,
     notes: result.notes.slice(0, 1000),

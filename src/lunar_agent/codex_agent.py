@@ -462,6 +462,7 @@ async def run_area_risk_codex_analysis(
     max_zones: int,
     evidence_urls: set[str] | None = None,
     interactive_route: bool = False,
+    authoritative_evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Analyze bounded public area-risk evidence through ChatGPT-authenticated Codex."""
     if not settings.codex_agent_enabled or not settings.area_risk_account_enabled:
@@ -490,6 +491,21 @@ async def run_area_risk_codex_analysis(
             str(item).strip()[:500]
             for item in sorted(evidence_urls or set())[:40]
             if str(item).strip()
+        ],
+        "interactiveRoute": bool(interactive_route),
+        "authoritativeEvidence": [
+            {
+                "url": str(item.get("url") or "").strip()[:500],
+                "publishedAt": str(
+                    item.get("published_at")
+                    or item.get("publishedAt")
+                    or item.get("date")
+                    or ""
+                ).strip()[:80],
+            }
+            for item in (authoritative_evidence or [])[:40]
+            if isinstance(item, dict)
+            and str(item.get("url") or "").strip()
         ],
     }
     if not payload["prompt"]:

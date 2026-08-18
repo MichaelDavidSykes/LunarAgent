@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -228,6 +229,8 @@ const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 if (process.env.OPENAI_API_KEY || process.env.LUNAR_AGENT_SHARED_TOKEN) process.exit(7);
+if (!payload.interactiveRoute) process.exit(8);
+if (payload.authoritativeEvidence?.[0]?.publishedAt !== "2026-08-10T00:00:00Z") process.exit(9);
 process.stdout.write(JSON.stringify({
   model: payload.model,
   notes: "account provider",
@@ -259,6 +262,13 @@ process.stdout.write(JSON.stringify({
             "Analyze this bounded public evidence.",
             max_zones=3,
             evidence_urls={"https://example.test/source"},
+            interactive_route=True,
+            authoritative_evidence=[
+                {
+                    "url": "https://example.test/source",
+                    "published_at": "2026-08-10T00:00:00Z",
+                }
+            ],
         )
     )
 
@@ -305,6 +315,32 @@ def test_area_risk_codex_analysis_rejects_non_chatgpt_auth(
         )
 
     assert exc_info.value.code == "codex_auth_unavailable"
+
+
+def test_area_risk_runner_fails_closed_without_recent_authoritative_evidence():
+    runner = Path(__file__).parents[1] / "codex_runtime" / "area_risk_runner.mjs"
+    completed = subprocess.run(
+        ["node", str(runner)],
+        input=json.dumps(
+            {
+                "prompt": "Analyze supplied public evidence.",
+                "workspace": "/tmp/lunar-area-risk-workspace",
+                "codexHome": "/tmp/lunar-area-risk-codex",
+                "model": "gpt-5.6-sol",
+                "reasoningEffort": "low",
+                "maxZones": 2,
+                "interactiveRoute": True,
+                "evidenceUrls": ["https://example.test/undated"],
+                "authoritativeEvidence": [],
+            }
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "requires recent authoritative evidence" in completed.stderr
 
 
 def test_area_risk_codex_capacity_allows_two_interactive_but_serializes_default(

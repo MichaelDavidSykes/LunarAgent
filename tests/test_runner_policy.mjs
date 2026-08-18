@@ -157,7 +157,12 @@ test("area-risk account provider permits web evidence but no local execution or 
   assert.match(areaRiskRunner, /execution_policy\.json/);
   assert.match(areaRiskRunner, /sandboxMode: EXECUTION_POLICY\.sandboxMode/);
   assert.match(areaRiskRunner, /networkAccessEnabled: EXECUTION_POLICY\.networkAccessEnabled/);
-  assert.match(areaRiskRunner, /webSearchMode: "live"/);
+  assert.match(areaRiskRunner, /webSearchMode: interactiveRoute \? "disabled" : "live"/);
+  assert.match(areaRiskRunner, /MAX_INTERACTIVE_EVIDENCE_AGE_MS = 90/);
+  assert.match(areaRiskRunner, /authoritativeEvidenceByUrl/);
+  assert.match(areaRiskRunner, /authoritativeEvidenceByUrl\.size === 0/);
+  assert.match(areaRiskRunner, /\(\\d\{4\}\)\(\\d\{2\}\)\(\\d\{2\}\)T/);
+  assert.match(areaRiskRunner, /Interactive area-risk result lacked recent authoritative evidence/);
   assert.match(areaRiskRunner, /approvalPolicy: "never"/);
   assert.match(areaRiskRunner, /shell_tool: false/);
   assert.match(areaRiskRunner, /unified_exec: false/);

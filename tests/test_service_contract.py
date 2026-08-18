@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -1998,6 +1999,14 @@ def test_area_risk_evidence_date_is_strict_and_supplied_date_is_authoritative():
     ]
 
 
+def test_area_risk_evidence_date_accepts_gdelt_basic_utc_format():
+    assert service_module._canonical_area_risk_evidence_date(
+        "20260818T112233Z",
+        now=datetime(2026, 8, 18, 12, 0, tzinfo=UTC),
+        max_age_days=90,
+    ) == "2026-08-18T11:22:33Z"
+
+
 def test_area_risk_normalization_preserves_verified_named_zone_for_downstream_geocoding():
     payload = service_module.normalize_safe_route_area_risk_payload(
         {
@@ -2181,7 +2190,8 @@ def test_area_risk_account_mode_forwards_interactive_route_capacity_hint(monkeyp
     monkeypatch.setattr(service_module.settings, "area_risk_provider_mode", "chatgpt-account")
     captured: dict[str, object] = {}
 
-    async def account_analysis(*_args, **kwargs):
+    async def account_analysis(*args, **kwargs):
+        captured["prompt"] = args[0]
         captured.update(kwargs)
         return {"model": "gpt-5.6-sol", "notes": "ok", "zones": []}
 
@@ -2190,7 +2200,12 @@ def test_area_risk_account_mode_forwards_interactive_route_capacity_hint(monkeyp
     result = asyncio.run(
         service_module.research_safe_route_area_risk(
             aoi={"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
-            evidence=[],
+            evidence=[
+                {
+                    "url": "https://example.test/recent",
+                    "published_at": datetime.now(UTC).date().isoformat(),
+                }
+            ],
             max_zones=2,
             interactive_route=True,
         )
@@ -2198,6 +2213,33 @@ def test_area_risk_account_mode_forwards_interactive_route_capacity_hint(monkeyp
 
     assert result["zones"] == []
     assert captured["interactive_route"] is True
+    assert captured["authoritative_evidence"][0]["url"] == "https://example.test/recent"
+    assert "Do not use live public web search" in captured["prompt"]
+    assert "evidence outside that 90-day window" in captured["prompt"]
+
+
+def test_interactive_area_risk_rejects_evidence_older_than_route_contract(monkeypatch):
+    monkeypatch.setattr(service_module.settings, "area_risk_provider_mode", "chatgpt-account")
+    source_url = "https://example.test/stale-route-risk"
+    stale_date = (datetime.now(UTC) - timedelta(days=120)).date().isoformat()
+
+    async def account_analysis(*_args, **_kwargs):  # pragma: no cover - fail-closed guard
+        raise AssertionError("Interactive model must not run without recent evidence")
+
+    monkeypatch.setattr(service_module, "run_area_risk_codex_analysis", account_analysis)
+
+    with pytest.raises(
+        RuntimeError,
+        match="ChatGPT-account area-risk analysis is temporarily unavailable",
+    ):
+        asyncio.run(
+            service_module.research_safe_route_area_risk(
+                aoi={"bounds": {"minLat": 0, "minLon": 0, "maxLat": 1, "maxLon": 1}},
+                evidence=[{"url": source_url, "published_at": stale_date}],
+                max_zones=2,
+                interactive_route=True,
+            )
+        )
 
 
 def test_area_risk_empty_web_result_does_not_double_call_model(monkeypatch):
